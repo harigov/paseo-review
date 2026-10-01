@@ -32,6 +32,11 @@ const DIFF_LAYOUT_OPTIONS = [
   { label: "Split (side by side)", value: "split" as const },
 ];
 
+const DIFF_DENSITY_OPTIONS = [
+  { label: "Comfortable", value: "comfortable" as const },
+  { label: "Compact", value: "compact" as const },
+];
+
 const AGENT_TASKS: { key: keyof PrReviewSettings["agents"]; label: string }[] = [
   { key: "summary", label: "Summary" },
   { key: "chat", label: "Chat" },
@@ -385,6 +390,12 @@ export function SettingsScreen(_props: PluginSurfaceProps): ReactNode {
             value={values.diffLayout}
             options={DIFF_LAYOUT_OPTIONS}
             onValueChange={(diffLayout) => committer.commit("diffLayout", (v) => ({ ...v, diffLayout }))}
+          />
+          <SettingsSelect
+            label="Diff density"
+            value={values.diffDensity}
+            options={DIFF_DENSITY_OPTIONS}
+            onValueChange={(diffDensity) => committer.commit("diffDensity", (v) => ({ ...v, diffDensity }))}
           />
         </SettingsGroup>
 
