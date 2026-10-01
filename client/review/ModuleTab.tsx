@@ -6,7 +6,18 @@ import { fileMoveRpc, fileViewedRpc } from "../../shared/rpc";
 import type { AnalyzedFile, ViewedState } from "../../shared/types";
 import type { ModuleTabProps } from "../pr/tab-props";
 import { FileDiffView, type FileDiffFinding } from "../diff/FileDiffView";
+import { OutlineView, outlineSummary } from "../diff/OutlineView";
+import { StructuralDiffView } from "../diff/StructuralDiffView";
 import { Chip, riskColor } from "../ui/chips";
+
+type FileViewMode = "text" | "structure";
+
+/** Structure by default for lockfiles and for large structural files; text everywhere else. */
+function defaultViewMode(file: AnalyzedFile): FileViewMode {
+  if ((file.structuralKind ?? null) === "lockfile") return "structure";
+  if (file.additions + file.deletions > 150) return "structure";
+  return "text";
+}
 
 function renamedLabel(file: AnalyzedFile): string {
   if (file.oldPath && file.oldPath !== file.path) return `${file.oldPath} → ${file.path}`;
@@ -36,6 +47,8 @@ export function ModuleTab(props: ModuleTabProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [movingPath, setMovingPath] = useState<string | null>(null);
   const [sinceViewedPaths, setSinceViewedPaths] = useState<Set<string>>(new Set());
+  const [outlineExpanded, setOutlineExpanded] = useState<Record<string, boolean>>({});
+  const [viewMode, setViewMode] = useState<Record<string, FileViewMode>>({});
 
   // Optimistic overrides exist only to bridge the gap until a fresh `analysis` lands. Once a
   // new snapshot arrives (react-query gives this a new reference only when content actually
@@ -153,6 +166,12 @@ export function ModuleTab(props: ModuleTabProps) {
       const scope: "full" | "since_viewed" | "since_last_review" =
         viewed === "DISMISSED" && sinceViewedPaths.has(file.path) ? "since_viewed" : sinceLastReview ? "since_last_review" : "full";
 
+      const outline = file.outline ?? [];
+      const structuralKind = file.structuralKind ?? null;
+      const outlineText = outlineSummary(outline);
+      const isOutlineExpanded = outlineExpanded[file.path] ?? outline.length <= 12;
+      const mode = viewMode[file.path] ?? defaultViewMode(file);
+
       return (
         <View style={{ borderBottomWidth: 1, borderColor: c.border }}>
           <View style={{ flexDirection: "row", alignItems: "center", padding: 10, gap: 8 }}>
@@ -194,6 +213,7 @@ export function ModuleTab(props: ModuleTabProps) {
                     </Text>
                   </Pressable>
                 ) : null}
+                {!isExpanded && outlineText ? <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{outlineText}</Text> : null}
               </View>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => setMovingPath(file.path)} style={{ padding: 4 }}>
@@ -202,18 +222,77 @@ export function ModuleTab(props: ModuleTabProps) {
           </View>
           {isExpanded ? (
             <View style={{ padding: 10, paddingTop: 0, gap: 8 }}>
-              <FileDiffView
-                repo={repo}
-                number={number}
-                path={file.path}
-                headSha={headSha}
-                scope={scope}
-                theme={theme}
-                layout={props.layout}
-                diffLayout={props.diffLayout}
-                threads={fileThreads}
-                findings={fileFindings}
-              />
+              {structuralKind ? (
+                <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
+                  {(["text", "structure"] as const).map((candidate) => (
+                    <Pressable
+                      key={candidate}
+                      accessibilityRole="button"
+                      onPress={() => setViewMode((prev) => ({ ...prev, [file.path]: candidate }))}
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 3,
+                        borderRadius: 999,
+                        borderWidth: 1,
+                        borderColor: mode === candidate ? c.accent : c.border,
+                        backgroundColor: mode === candidate ? c.accent : "transparent",
+                      }}
+                    >
+                      <Text style={{ color: mode === candidate ? c.accentForeground : c.foregroundMuted, fontSize: 11 }}>
+                        {candidate === "text" ? "Text" : "Structure"}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+              {outline.length > 0 ? (
+                <View style={{ gap: 4 }}>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setOutlineExpanded((prev) => ({ ...prev, [file.path]: !isOutlineExpanded }))}
+                    style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+                  >
+                    <Icon name={isOutlineExpanded ? "ChevronDown" : "ChevronRight"} size={13} color={c.foregroundMuted} />
+                    <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>Outline</Text>
+                    {outlineText ? <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{outlineText}</Text> : null}
+                  </Pressable>
+                  {isOutlineExpanded ? (
+                    <OutlineView
+                      entries={outline}
+                      theme={theme}
+                      onSelect={() => {
+                        // v1: no scroll-to-line API on FileDiffView yet, so selecting an outline
+                        // row just makes sure the file's diff is visible in text mode.
+                        setExpanded((prev) => ({ ...prev, [file.path]: true }));
+                        setViewMode((prev) => ({ ...prev, [file.path]: "text" }));
+                      }}
+                    />
+                  ) : null}
+                </View>
+              ) : null}
+              {mode === "structure" && structuralKind ? (
+                <StructuralDiffView
+                  repo={repo}
+                  number={number}
+                  path={file.path}
+                  headSha={headSha}
+                  theme={theme}
+                  onShowText={() => setViewMode((prev) => ({ ...prev, [file.path]: "text" }))}
+                />
+              ) : (
+                <FileDiffView
+                  repo={repo}
+                  number={number}
+                  path={file.path}
+                  headSha={headSha}
+                  scope={scope}
+                  theme={theme}
+                  layout={props.layout}
+                  diffLayout={props.diffLayout}
+                  threads={fileThreads}
+                  findings={fileFindings}
+                />
+              )}
               <Pressable
                 accessibilityRole="button"
                 onPress={() => markViewedAndNext(file)}
@@ -227,7 +306,23 @@ export function ModuleTab(props: ModuleTabProps) {
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viewedOverride, expanded, detail, analysis, sinceViewedPaths, sinceLastReview, c, repo, number, headSha, theme, props.layout, props.diffLayout],
+    [
+      viewedOverride,
+      expanded,
+      detail,
+      analysis,
+      sinceViewedPaths,
+      sinceLastReview,
+      outlineExpanded,
+      viewMode,
+      c,
+      repo,
+      number,
+      headSha,
+      theme,
+      props.layout,
+      props.diffLayout,
+    ],
   );
 
   if (!analysis) return <Text style={{ color: c.foregroundMuted, padding: 16 }}>Loading module…</Text>;

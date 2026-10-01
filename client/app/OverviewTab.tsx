@@ -3,11 +3,27 @@ import { Pressable, Text, View } from "react-native";
 import { Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PrTabContext } from "../pr/tab-props";
+import type { AnalyzedFile, OutlineEntry } from "../../shared/types";
 import { useJobRunner } from "../data/hooks";
 import { Markdown } from "../render/Markdown";
 import { HtmlView } from "../render/HtmlView";
 import { agentTaskRpc } from "../../shared/rpc";
 import { extractRichHtml, stripRichHtml } from "../../shared/rich-html";
+import { Chip } from "../ui/chips";
+
+const EXPORTED_SURFACE_CHANGES: ReadonlySet<OutlineEntry["change"]> = new Set(["signature", "removed", "renamed"]);
+const EXPORTED_SURFACE_CAP = 200;
+
+function exportedSurfaceChangeColor(change: OutlineEntry["change"], c: PrTabContext["theme"]["colors"]): string {
+  switch (change) {
+    case "removed":
+      return c.statusDanger;
+    case "signature":
+      return c.statusWarning;
+    default:
+      return c.accent;
+  }
+}
 
 const SEVERITY_LABELS: Record<number, string> = { 1: "Trivial", 2: "Minor", 3: "Moderate", 4: "Major", 5: "Critical" };
 
@@ -44,6 +60,26 @@ export function OverviewTab(props: PrTabContext) {
   const resolvedThreads = detail.threads.length - openThreads;
   const checksPassing = detail.checks.filter((ck) => ck.state === "success").length;
   const checksFailing = detail.checks.filter((ck) => ck.state === "failure").length;
+
+  const exportedSurfaceGroups: { file: AnalyzedFile; entries: OutlineEntry[] }[] = (analysis?.files ?? [])
+    .map((file) => ({
+      file,
+      entries: (file.outline ?? []).filter((entry) => entry.exported && EXPORTED_SURFACE_CHANGES.has(entry.change)),
+    }))
+    .filter((group) => group.entries.length > 0);
+  const exportedSurfaceTotal = exportedSurfaceGroups.reduce((sum, group) => sum + group.entries.length, 0);
+  const exportedSurfaceShown = Math.min(exportedSurfaceTotal, EXPORTED_SURFACE_CAP);
+  const exportedSurfaceOmitted = exportedSurfaceTotal - exportedSurfaceShown;
+  const exportedSurfaceCapped: { file: AnalyzedFile; entries: OutlineEntry[] }[] = [];
+  {
+    let remaining = EXPORTED_SURFACE_CAP;
+    for (const group of exportedSurfaceGroups) {
+      if (remaining <= 0) break;
+      const entries = group.entries.slice(0, remaining);
+      exportedSurfaceCapped.push({ file: group.file, entries });
+      remaining -= entries.length;
+    }
+  }
 
   async function runSummary() {
     try {
@@ -145,6 +181,43 @@ export function OverviewTab(props: PrTabContext) {
               </Text>
             </Pressable>
           ))}
+        </View>
+      )}
+
+      {exportedSurfaceCapped.length > 0 && (
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>Exported surface changed</Text>
+          {exportedSurfaceCapped.map(({ file, entries }) => (
+            <View key={file.path} style={{ borderWidth: 1, borderColor: c.border, borderRadius: 6, overflow: "hidden" }}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => openTab(`module:${file.moduleId}`)}
+                style={({ pressed }) => ({ padding: 8, backgroundColor: pressed ? c.surface2 : c.surface1 })}
+              >
+                <Text style={{ color: c.foreground, fontSize: 12 }} numberOfLines={1}>
+                  {file.path}
+                </Text>
+              </Pressable>
+              {entries.map((entry, index) => (
+                <View
+                  key={`${entry.name}-${index}`}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", paddingHorizontal: 8, paddingVertical: 4, borderTopWidth: 1, borderColor: c.border }}
+                >
+                  <Chip label={entry.change} color={exportedSurfaceChangeColor(entry.change, c)} />
+                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{entry.kind}</Text>
+                  <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>{entry.name}</Text>
+                  {entry.change === "signature" ? (
+                    <Text style={{ color: c.foregroundMuted, fontSize: 11, fontFamily: "monospace", flex: 1 }} numberOfLines={1}>
+                      {entry.oldSignature ?? ""} {"→"} {entry.signature}
+                    </Text>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          ))}
+          {exportedSurfaceOmitted > 0 ? (
+            <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>… and {exportedSurfaceOmitted} more</Text>
+          ) : null}
         </View>
       )}
 
