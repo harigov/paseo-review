@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pairHunkLines, splitRowCount } from "../client/diff/pairing";
+import { expandTabs, markWhitespace, pairHunkLines, splitRowCount } from "../client/diff/pairing";
 import type { DiffLine } from "../shared/types";
 
 function ctx(oldNo: number, newNo: number): DiffLine {
@@ -95,5 +95,50 @@ describe("splitRowCount", () => {
     const lines = [ctx(1, 1), del(2), del(3), add(2)];
     expect(splitRowCount(lines)).toBe(pairHunkLines(lines).length);
     expect(splitRowCount(lines)).toBe(3);
+  });
+});
+
+describe("expandTabs", () => {
+  it("expands a leading tab to a full tab stop", () => {
+    expect(expandTabs("\tfoo")).toBe("    foo");
+  });
+
+  it("expands a tab after 2 characters to only advance to the next column-4 stop", () => {
+    expect(expandTabs("ab\tfoo")).toBe("ab  foo");
+  });
+
+  it("expands multiple consecutive tabs", () => {
+    expect(expandTabs("\t\tfoo")).toBe("        foo");
+  });
+
+  it("leaves text with no tabs unchanged", () => {
+    expect(expandTabs("abcdef")).toBe("abcdef");
+  });
+
+  it("honors a custom tab size", () => {
+    expect(expandTabs("a\tb", 2)).toBe("a b");
+  });
+});
+
+describe("markWhitespace", () => {
+  it("turns spaces into middle dots", () => {
+    expect(markWhitespace("  foo")).toBe("··foo");
+  });
+
+  it("turns a leading tab into an arrow plus dots filling its expanded width", () => {
+    expect(markWhitespace("\tfoo")).toBe("→···foo");
+  });
+
+  it("accounts for preceding column position when marking a tab", () => {
+    // "a" occupies column 0, so the tab only needs 3 more columns to reach column 4.
+    expect(markWhitespace("a\tb")).toBe("a→··b");
+  });
+
+  it("leaves non-whitespace characters unchanged", () => {
+    expect(markWhitespace("abcdef")).toBe("abcdef");
+  });
+
+  it("marks a mix of spaces and tabs", () => {
+    expect(markWhitespace(" \tx")).toBe("·→··x");
   });
 });

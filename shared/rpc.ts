@@ -70,6 +70,31 @@ export const threadReplyRpc = defineRpc({
   output: Ok,
 });
 
+/** Posts a single review comment immediately (not part of a pending review). */
+export const commentCreateRpc = defineRpc({
+  name: "prr.comment.create",
+  input: PrRef.extend({
+    path: z.string(),
+    line: z.number(),
+    side: z.enum(["LEFT", "RIGHT"]),
+    body: z.string(),
+    commitSha: z.string(),
+  }),
+  output: z.object({ id: z.string(), url: z.string().nullable() }),
+});
+
+export const commentUpdateRpc = defineRpc({
+  name: "prr.comment.update",
+  input: PrRef.extend({ commentId: z.string(), body: z.string() }),
+  output: Ok,
+});
+
+export const commentDeleteRpc = defineRpc({
+  name: "prr.comment.delete",
+  input: PrRef.extend({ commentId: z.string() }),
+  output: Ok,
+});
+
 
 // ---------- analysis (server/analysis) ----------
 

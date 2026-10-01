@@ -291,6 +291,8 @@ export function ModuleTab(props: ModuleTabProps) {
                   diffLayout={props.diffLayout}
                   threads={fileThreads}
                   findings={fileFindings}
+                  viewer={detail?.viewer ?? null}
+                  onCommented={refresh}
                 />
               )}
               <Pressable
@@ -322,6 +324,7 @@ export function ModuleTab(props: ModuleTabProps) {
       theme,
       props.layout,
       props.diffLayout,
+      refresh,
     ],
   );
 
