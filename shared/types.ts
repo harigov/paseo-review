@@ -15,7 +15,8 @@ export const RepoSchema = z.object({
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
-export const InboxSectionSchema = z.enum(["mine", "review_requested", "assigned", "all"]);
+/** "recent" = PRs the viewer reviewed (any state), newest activity first; the rest are open PRs. */
+export const InboxSectionSchema = z.enum(["recent", "mine", "review_requested", "assigned", "all"]);
 export type InboxSection = z.infer<typeof InboxSectionSchema>;
 
 export const ChecksStateSchema = z.enum(["success", "failure", "pending", "none"]);

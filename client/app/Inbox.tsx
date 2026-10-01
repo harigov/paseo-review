@@ -4,6 +4,8 @@ import { FlatList, Icon } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useInbox, useRepos } from "../data/hooks";
 import type { InboxSection, PrSummary } from "../../shared/types";
+import type { RecentPr } from "../../shared/ui-state";
+import { useRecentPrs } from "./ui-state";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 type ReviewDecision = PrSummary["reviewDecision"];
@@ -12,15 +14,26 @@ type SortKey = "attention" | "updated" | "created" | "size" | "severity";
 type CiFilter = "any" | "failing" | "passing";
 type ReviewFilter = "any" | ReviewDecision;
 
-const SECTION_ORDER: InboxSection[] = ["mine", "review_requested", "assigned", "all"];
+const SECTION_ORDER: InboxSection[] = ["recent", "mine", "review_requested", "assigned", "all"];
 const SECTION_LABELS: Record<InboxSection, string> = {
+  recent: "Recently reviewed",
   mine: "My PRs",
   review_requested: "Review requested",
   assigned: "Assigned",
   all: "All open",
 };
 
-type Row = { kind: "header"; section: InboxSection; count: number } | { kind: "pr"; key: string; pr: PrSummary };
+type Row =
+  | { kind: "header"; section: InboxSection; count: number }
+  | { kind: "pr"; key: string; pr: PrSummary }
+  /** A PR opened in this app that no inbox search returned (e.g. merged long ago): title only. */
+  | { kind: "recentLite"; key: string; recent: RecentPr };
+
+const STATE_LABEL: Record<PrSummary["state"], string> = { OPEN: "", CLOSED: "Closed", MERGED: "Merged" };
+
+function prKey(repo: string, number: number): string {
+  return `${repo.toLowerCase()}#${number}`;
+}
 
 function relativeAge(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -72,11 +85,12 @@ export function Inbox({
 }: {
   theme: PluginSurfaceProps["theme"];
   layout: PluginSurfaceProps["layout"];
-  onOpenPr(ref: { repo: string; number: number }): void;
+  onOpenPr(ref: { repo: string; number: number; title?: string }): void;
 }) {
   const c = theme.colors;
   const inbox = useInbox();
   const repos = useRepos();
+  const recentLocal = useRecentPrs();
   const [collapsed, setCollapsed] = useState<Partial<Record<InboxSection, boolean>>>({});
   const [search, setSearch] = useState("");
   const [repoFilter, setRepoFilter] = useState<string | null>(null);
@@ -129,6 +143,37 @@ export function Inbox({
     }
     const out: Row[] = [];
     for (const section of SECTION_ORDER) {
+      if (section === "recent") {
+        // Most recently opened in this app first (full rows when a search returned the PR),
+        // then whatever GitHub says you reviewed that you haven't opened here.
+        const byKey = new Map(filtered.map((pr) => [prKey(pr.repo, pr.number), pr]));
+        const seen = new Set<string>();
+        const rows: Row[] = [];
+        for (const recent of recentLocal) {
+          const key = prKey(recent.repo, recent.number);
+          if (seen.has(key)) continue;
+          const pr = byKey.get(key);
+          if (pr) {
+            seen.add(key);
+            rows.push({ kind: "pr", key: `recent:${key}`, pr });
+            continue;
+          }
+          if (repoFilter && recent.repo !== repoFilter) continue;
+          const q = search.trim().toLowerCase();
+          if (q && !`${recent.title} ${recent.repo} #${recent.number}`.toLowerCase().includes(q)) continue;
+          seen.add(key);
+          rows.push({ kind: "recentLite", key: `recent-lite:${key}`, recent });
+        }
+        for (const pr of sortPrs(filtered.filter((pr) => pr.sections.includes("recent")))) {
+          const key = prKey(pr.repo, pr.number);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          rows.push({ kind: "pr", key: `recent:${key}`, pr });
+        }
+        out.push({ kind: "header", section, count: rows.length });
+        if (!collapsed[section]) out.push(...rows);
+        continue;
+      }
       const inSection = sortPrs(filtered.filter((pr) => pr.sections.includes(section)));
       out.push({ kind: "header", section, count: inSection.length });
       if (!collapsed[section]) {
@@ -136,7 +181,7 @@ export function Inbox({
       }
     }
     return out;
-  }, [filtered, collapsed, effectiveSort]);
+  }, [filtered, collapsed, effectiveSort, recentLocal, repoFilter, search]);
 
   const sortLabels: Record<SortKey, string> = {
     attention: "Sort: Attention",
@@ -238,12 +283,37 @@ export function Inbox({
                     alignItems: "center",
                     gap: 8,
                     paddingVertical: 10,
-                    marginTop: item.section === "mine" ? 0 : 6,
+                    marginTop: item.section === SECTION_ORDER[0] ? 0 : 6,
                   }}
                 >
                   <Icon name={isCollapsed ? "ChevronRight" : "ChevronDown"} size={14} color={c.foregroundMuted} />
                   <Text style={{ color: c.foreground, fontSize: 13, fontWeight: "600" }}>
                     {SECTION_LABELS[item.section]} ({item.count})
+                  </Text>
+                </Pressable>
+              );
+            }
+            if (item.kind === "recentLite") {
+              const recent = item.recent;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => onOpenPr({ repo: recent.repo, number: recent.number, title: recent.title })}
+                  style={({ pressed }) => ({
+                    padding: 14,
+                    borderRadius: 8,
+                    borderWidth: 1,
+                    borderColor: c.border,
+                    backgroundColor: pressed ? c.surface2 : c.surface1,
+                    gap: 6,
+                  })}
+                >
+                  <Text numberOfLines={2} style={{ color: c.foreground, fontSize: 14, fontWeight: "600", lineHeight: 20 }}>
+                    {recent.title}
+                  </Text>
+                  <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
+                    {recent.repo}#{recent.number} · opened {relativeAge(recent.openedAt)} ago
+                    {recent.reviewedAt ? ` · reviewed ${relativeAge(recent.reviewedAt)} ago` : ""}
                   </Text>
                 </Pressable>
               );
@@ -254,7 +324,7 @@ export function Inbox({
             return (
               <Pressable
                 accessibilityRole="button"
-                onPress={() => onOpenPr({ repo: pr.repo, number: pr.number })}
+                onPress={() => onOpenPr({ repo: pr.repo, number: pr.number, title: pr.title })}
                 style={({ pressed }) => ({
                   padding: 14,
                   borderRadius: 8,
@@ -272,6 +342,11 @@ export function Inbox({
                     {pr.repo}#{pr.number} · {pr.author} · {relativeAge(pr.updatedAt)}
                   </Text>
                   {pr.isDraft && <Text style={{ color: c.foregroundMuted, backgroundColor: c.surface2, borderRadius: 4, fontSize: 12, paddingHorizontal: 5 }}>Draft</Text>}
+                  {!!STATE_LABEL[pr.state] && (
+                    <Text style={{ color: pr.state === "MERGED" ? c.accent : c.foregroundMuted, backgroundColor: c.surface2, borderRadius: 4, fontSize: 12, paddingHorizontal: 5 }}>
+                      {STATE_LABEL[pr.state]}
+                    </Text>
+                  )}
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: ciColor }} />
                   {!!REVIEW_LABEL[pr.reviewDecision] && <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{REVIEW_LABEL[pr.reviewDecision]}</Text>}
                   <Text style={{ color: c.statusSuccess, fontSize: 12 }}>+{pr.additions}</Text>

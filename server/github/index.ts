@@ -331,7 +331,8 @@ const PR_SEARCH_FRAGMENT = `
 `;
 
 const INBOX_QUERY = `
-  query($qMine: String!, $qReview: String!, $qAssigned: String!, $qAll: String!) {
+  query($qMine: String!, $qReview: String!, $qAssigned: String!, $qAll: String!, $qRecent: String!) {
+    recent: search(type: ISSUE, first: 20, query: $qRecent) { nodes { ... on PullRequest { ...prFields } } }
     mine: search(type: ISSUE, first: 50, query: $qMine) { nodes { ... on PullRequest { ...prFields } } }
     reviewRequested: search(type: ISSUE, first: 50, query: $qReview) { nodes { ... on PullRequest { ...prFields } } }
     assigned: search(type: ISSUE, first: 50, query: $qAssigned) { nodes { ... on PullRequest { ...prFields } } }
@@ -422,6 +423,8 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
 
   const repoFilter = repos.map((r) => `repo:${r.slug}`).join(" ");
   const sections: Record<InboxSection, string> = {
+    // Any state: a PR you reviewed last week and that merged since still belongs under "recent".
+    recent: `is:pr reviewed-by:@me -author:@me ${repoFilter} sort:updated-desc`,
     mine: `is:pr is:open author:@me ${repoFilter}`,
     review_requested: `is:pr is:open review-requested:@me ${repoFilter}`,
     assigned: `is:pr is:open assignee:@me ${repoFilter}`,
@@ -431,6 +434,7 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
   const merged = new Map<string, PrSummary>();
   try {
     const data = await graphqlWithVars<{
+      recent: { nodes: SearchPrNode[] };
       mine: { nodes: SearchPrNode[] };
       reviewRequested: { nodes: SearchPrNode[] };
       assigned: { nodes: SearchPrNode[] };
@@ -440,9 +444,11 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
       qReview: sections.review_requested,
       qAssigned: sections.assigned,
       qAll: sections.all,
+      qRecent: sections.recent,
     });
 
     const bySection: Array<[InboxSection, SearchPrNode[]]> = [
+      ["recent", data.recent?.nodes ?? []],
       ["mine", data.mine?.nodes ?? []],
       ["review_requested", data.reviewRequested?.nodes ?? []],
       ["assigned", data.assigned?.nodes ?? []],
