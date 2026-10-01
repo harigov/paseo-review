@@ -3,6 +3,8 @@ import { Pressable, Text, View } from "react-native";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { ValidatorFinding, ValidatorResult } from "../../shared/types";
+import { font, space, surfaces, weight } from "../ui/tokens";
+import { EmptyState } from "../ui/states";
 
 const SEVERITY_WEIGHT: Record<ValidatorResult["severity"], number> = { blocking: 0, warning: 1, info: 2 };
 
@@ -37,28 +39,32 @@ function FindingRow({
   finding,
   theme,
   renderFindingActions,
+  isFirst,
 }: {
   result: ValidatorResult;
   finding: ValidatorFinding;
   theme: PluginSurfaceProps["theme"];
   renderFindingActions?: (result: ValidatorResult, finding: ValidatorFinding) => ReactNode;
+  isFirst: boolean;
 }) {
   const c = theme.colors;
+  const s = surfaces(c);
   const location = finding.path ? `${finding.path}${finding.startLine ? `:${finding.startLine}` : ""}` : "(PR-level)";
   return (
-    <View style={{ gap: 4, paddingVertical: 6, paddingHorizontal: 10, borderTopWidth: 1, borderColor: c.border }}>
+    <View style={{ gap: space.xs, paddingTop: space.sm }}>
+      {!isFirst ? <View style={{ ...s.hairline, marginBottom: space.sm }} /> : null}
       <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-        <Text style={{ color: c.foreground, fontSize: 12 }}>{location}</Text>
-        <Text style={{ color: finding.status === "fail" ? c.statusDanger : c.statusWarning, fontSize: 12, fontWeight: "600" }}>
+        <Text style={{ ...font.small, color: c.foreground }}>{location}</Text>
+        <Text style={{ ...font.small, fontWeight: weight.semibold, color: finding.status === "fail" ? c.statusDanger : c.statusWarning }}>
           {Math.round(finding.probability * 100)}%
         </Text>
       </View>
-      <Text style={{ color: c.foregroundMuted, fontSize: 11, fontFamily: "monospace" }} numberOfLines={4}>
+      <Text style={{ ...font.caption, color: c.foregroundMuted, fontFamily: "monospace" }} numberOfLines={4}>
         {finding.excerpt}
       </Text>
-      {finding.dismissed ? <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>Dismissed</Text> : null}
+      {finding.dismissed ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>Dismissed</Text> : null}
       {renderFindingActions ? (
-        <View style={{ flexDirection: "row", gap: 8, marginTop: 2 }}>{renderFindingActions(result, finding)}</View>
+        <View style={{ flexDirection: "row", gap: space.sm, marginTop: 2 }}>{renderFindingActions(result, finding)}</View>
       ) : null}
     </View>
   );
@@ -76,31 +82,41 @@ function ResultGroup({
   renderFindingActions?: (result: ValidatorResult, finding: ValidatorFinding) => ReactNode;
 }) {
   const c = theme.colors;
+  const s = surfaces(c);
   const [expanded, setExpanded] = useState(defaultExpanded);
   const color = result.status === "fail" ? c.statusDanger : result.status === "uncertain" ? c.statusWarning : c.foregroundMuted;
   return (
-    <View style={{ borderWidth: 1, borderColor: c.border, borderRadius: 6, overflow: "hidden" }}>
+    <View style={s.card}>
       <Pressable
         accessibilityRole="button"
         onPress={() => setExpanded((value) => !value)}
-        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 10, backgroundColor: c.surface1 }}
+        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
-          <Text style={{ color, fontSize: 13 }}>{statusGlyph(result.status)}</Text>
-          <Text style={{ color: c.foreground, fontSize: 13, flex: 1 }} numberOfLines={1}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flex: 1 }}>
+          <Text style={{ ...font.small, color }}>{statusGlyph(result.status)}</Text>
+          <Text style={{ ...font.body, color: c.foreground, flex: 1 }} numberOfLines={1}>
             {result.title}
           </Text>
-          <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{result.severity}</Text>
+          <Text style={{ ...font.caption, color: c.foregroundMuted }}>{result.severity}</Text>
         </View>
         <Icon name={expanded ? "ChevronUp" : "ChevronDown"} size={14} color={c.foregroundMuted} />
       </Pressable>
       {expanded ? (
         result.findings.length > 0 ? (
-          result.findings.map((finding, index) => (
-            <FindingRow key={`${finding.unitKey}-${index}`} result={result} finding={finding} theme={theme} renderFindingActions={renderFindingActions} />
-          ))
+          <View>
+            {result.findings.map((finding, index) => (
+              <FindingRow
+                key={`${finding.unitKey}-${index}`}
+                result={result}
+                finding={finding}
+                theme={theme}
+                renderFindingActions={renderFindingActions}
+                isFirst={index === 0}
+              />
+            ))}
+          </View>
         ) : (
-          <Text style={{ color: c.foregroundMuted, fontSize: 11, padding: 10 }}>
+          <Text style={{ ...font.caption, color: c.foregroundMuted, paddingTop: space.sm }}>
             {result.error ?? `${result.unitsApplicable} of ${result.unitsEvaluated} units applicable, no findings.`}
           </Text>
         )
@@ -111,27 +127,31 @@ function ResultGroup({
 
 function CollapsedSection({ title, results, theme }: { title: string; results: ValidatorResult[]; theme: PluginSurfaceProps["theme"] }) {
   const c = theme.colors;
+  const s = surfaces(c);
   const [expanded, setExpanded] = useState(false);
   if (results.length === 0) return null;
   return (
-    <View style={{ borderWidth: 1, borderColor: c.border, borderRadius: 6, overflow: "hidden" }}>
+    <View style={s.card}>
       <Pressable
         accessibilityRole="button"
         onPress={() => setExpanded((value) => !value)}
-        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 8, backgroundColor: c.surface1 }}
+        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
       >
-        <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
+        <Text style={{ ...font.small, color: c.foregroundMuted }}>
           {title} ({results.length})
         </Text>
         <Icon name={expanded ? "ChevronUp" : "ChevronDown"} size={13} color={c.foregroundMuted} />
       </Pressable>
-      {expanded
-        ? results.map((result) => (
-            <Text key={result.validatorId} style={{ color: c.foregroundMuted, fontSize: 11, padding: 8, borderTopWidth: 1, borderColor: c.border }}>
-              {result.title}
-            </Text>
-          ))
-        : null}
+      {expanded ? (
+        <View style={{ marginTop: space.sm }}>
+          {results.map((result, index) => (
+            <View key={result.validatorId} style={{ paddingVertical: space.xs }}>
+              {index > 0 ? <View style={{ ...s.hairline, marginBottom: space.xs }} /> : null}
+              <Text style={{ ...font.caption, color: c.foregroundMuted }}>{result.title}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -154,8 +174,19 @@ export function ValidatorResultsList({
   const na = results.filter((result) => result.status === "na");
   const errored = results.filter((result) => result.status === "error");
 
+  if (results.length === 0) {
+    return (
+      <EmptyState
+        theme={theme}
+        icon="ShieldCheck"
+        title="No validators enabled"
+        hint="Add or enable validators under .paseo/validators to see results here."
+      />
+    );
+  }
+
   return (
-    <View style={{ gap: 8 }}>
+    <View style={{ gap: space.sm }}>
       {fail.map((result) => (
         <ResultGroup key={result.validatorId} result={result} theme={theme} defaultExpanded renderFindingActions={renderFindingActions} />
       ))}

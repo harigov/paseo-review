@@ -6,6 +6,8 @@ import type { PrTabContext } from "../pr/tab-props";
 import type { PrCheck, ReviewDecision, ReviewState, ValidatorResult } from "../../shared/types";
 import { Chip, Dot } from "../ui/chips";
 import { relativeAge } from "../ui/time";
+import { font, space, surfaces, weight } from "../ui/tokens";
+import { Skeleton } from "../ui/states";
 import { validatorScoreboard } from "./ValidatorResultsList";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
@@ -55,21 +57,30 @@ function groupChecksByApp(checks: PrCheck[]): { app: string; checks: PrCheck[] }
   return groups;
 }
 
+/** Small avatar fallback: a filled circle with the reviewer's first initial (no avatar URL is
+ * available for reviewers, only for the PR author). */
+function ReviewerAvatar({ author, c }: { author: string; c: ThemeColors }) {
+  const letter = (author.trim()[0] ?? "?").toUpperCase();
+  return (
+    <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: c.surface2, alignItems: "center", justifyContent: "center" }}>
+      <Text style={{ ...font.caption, fontWeight: weight.semibold, color: c.foreground }}>{letter}</Text>
+    </View>
+  );
+}
+
 /** Right-hand status panel: review state (humans and bots), CI checks grouped by app, and the
  * validator scoreboard. Rendered as a fixed right column on wide layouts and inside a modal on
  * compact ones (see PrScreen.tsx). */
 export function StatusPanel(props: PrTabContext) {
   const { theme, detail, analysis, openTab } = props;
   const c = theme.colors;
-
-  const sectionTitle = { fontSize: 12, fontWeight: "600" as const, color: c.foreground };
-  const rowText = { fontSize: 12, color: c.foreground };
-  const muted = { fontSize: 11, color: c.foregroundMuted };
+  const s = surfaces(c);
+  const muted = { ...font.small, color: c.foregroundMuted };
 
   if (!detail) {
     return (
-      <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 12 }}>
-        <Text style={muted}>Loading…</Text>
+      <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: space.md }}>
+        <Skeleton theme={theme} rows={4} />
       </ScrollView>
     );
   }
@@ -89,9 +100,9 @@ export function StatusPanel(props: PrTabContext) {
   const uncertainValidators = (analysis?.validators ?? []).filter((v) => v.status === "uncertain");
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 12, gap: 20 }}>
-      <View style={{ gap: 6 }}>
-        <Text style={sectionTitle}>Review</Text>
+    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: space.md, gap: space.lg }}>
+      <View style={{ ...s.card, gap: space.sm }}>
+        <Text style={{ ...font.title, color: c.foreground }}>Review</Text>
         {reviewDecisionChip && <Chip label={reviewDecisionChip.label} color={reviewDecisionChip.color(c)} />}
         {detail.reviews.length === 0 ? (
           <Text style={muted}>No reviews yet.</Text>
@@ -99,9 +110,10 @@ export function StatusPanel(props: PrTabContext) {
           detail.reviews.map((review, index) => {
             const icon = REVIEW_STATE_ICON[review.state];
             const row = (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+                <ReviewerAvatar author={review.author} c={c} />
                 <Icon name={icon.name} size={13} color={icon.color(c)} />
-                <Text numberOfLines={1} style={{ ...rowText, flex: 1 }}>
+                <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
                   {review.author}
                 </Text>
                 {review.authorKind === "bot" && <Chip label="bot" color={c.foregroundMuted} />}
@@ -109,12 +121,17 @@ export function StatusPanel(props: PrTabContext) {
               </View>
             );
             const key = `${review.author}-${review.state}-${index}`;
-            return review.url ? (
-              <Pressable key={key} accessibilityRole="button" onPress={() => void openExternalUrl(review.url!)}>
-                {row}
-              </Pressable>
-            ) : (
-              <View key={key}>{row}</View>
+            return (
+              <View key={key} style={{ gap: space.sm }}>
+                {index > 0 ? <View style={s.hairline} /> : null}
+                {review.url ? (
+                  <Pressable accessibilityRole="button" onPress={() => void openExternalUrl(review.url!)}>
+                    {row}
+                  </Pressable>
+                ) : (
+                  row
+                )}
+              </View>
             );
           })
         )}
@@ -130,8 +147,8 @@ export function StatusPanel(props: PrTabContext) {
         )}
       </View>
 
-      <View style={{ gap: 6 }}>
-        <Text style={sectionTitle}>Checks</Text>
+      <View style={{ ...s.card, gap: space.sm }}>
+        <Text style={{ ...font.title, color: c.foreground }}>Checks</Text>
         {detail.checks.length === 0 ? (
           <Text style={muted}>No checks.</Text>
         ) : (
@@ -139,14 +156,15 @@ export function StatusPanel(props: PrTabContext) {
             <Text style={muted}>
               {checksPassing} passing · {checksFailing} failing · {checksPending} pending
             </Text>
-            {checkGroups.map((group) => (
-              <View key={group.app} style={{ gap: 4 }}>
-                <Text style={{ ...muted, fontWeight: "600" as const }}>{group.app}</Text>
+            {checkGroups.map((group, groupIndex) => (
+              <View key={group.app} style={{ gap: space.xs }}>
+                {groupIndex > 0 ? <View style={{ ...s.hairline, marginBottom: space.xs }} /> : null}
+                <Text style={{ ...muted, fontWeight: weight.semibold }}>{group.app}</Text>
                 {group.checks.map((check, index) => {
                   const row = (
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
                       <Dot color={CHECK_DOT_COLOR[check.state](c)} />
-                      <Text numberOfLines={1} style={{ ...rowText, flex: 1 }}>
+                      <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
                         {check.name}
                       </Text>
                     </View>
@@ -166,30 +184,32 @@ export function StatusPanel(props: PrTabContext) {
         )}
       </View>
 
-      <View style={{ gap: 6 }}>
-        <Text style={sectionTitle}>Validators</Text>
+      <View style={{ ...s.card, gap: space.sm }}>
+        <Text style={{ ...font.title, color: c.foreground }}>Validators</Text>
         {!analysis ? (
           <Text style={muted}>Not analyzed yet.</Text>
         ) : (
           <>
             <Text style={muted}>{validatorScoreboard(analysis.validators)}</Text>
             {analysis.decisionsEnabled === false && <Text style={muted}>Decision model off for this repo.</Text>}
-            {[...failingValidators, ...uncertainValidators].map((result) => (
-              <Pressable
-                key={result.validatorId}
-                accessibilityRole="button"
-                onPress={() => openTab("validators")}
-                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
-              >
-                <Text style={{ fontSize: 12, color: result.status === "fail" ? c.statusDanger : c.statusWarning }}>
-                  {result.status === "fail" ? "✗" : "?"}
-                </Text>
-                <Text numberOfLines={1} style={{ ...rowText, flex: 1 }}>
-                  {result.title}
-                </Text>
-                <Text style={muted}>{result.severity}</Text>
-                <Text style={muted}>{result.findings.length} findings</Text>
-              </Pressable>
+            {[...failingValidators, ...uncertainValidators].map((result, index) => (
+              <View key={result.validatorId}>
+                {index > 0 ? <View style={{ ...s.hairline, marginBottom: space.xs }} /> : null}
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => openTab("validators")}
+                  style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}
+                >
+                  <Text style={{ ...font.small, color: result.status === "fail" ? c.statusDanger : c.statusWarning }}>
+                    {result.status === "fail" ? "✗" : "?"}
+                  </Text>
+                  <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
+                    {result.title}
+                  </Text>
+                  <Text style={muted}>{result.severity}</Text>
+                  <Text style={muted}>{result.findings.length} findings</Text>
+                </Pressable>
+              </View>
             ))}
           </>
         )}

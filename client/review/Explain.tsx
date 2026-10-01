@@ -6,6 +6,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { z } from "zod";
 import { agentTaskRpc } from "../../shared/rpc";
 import { useJobRunner } from "../data/hooks";
+import { font, space } from "../ui/tokens";
 
 export interface ExplainResult {
   explanation: string;
@@ -73,23 +74,23 @@ export function ExplainAction({
         style={({ pressed }) => ({
           flexDirection: "row",
           alignItems: "center",
-          gap: 4,
-          paddingHorizontal: 8,
-          paddingVertical: 4,
+          gap: space.xs,
+          paddingHorizontal: space.sm,
+          paddingVertical: space.xs,
           borderRadius: 4,
           backgroundColor: pressed ? c.surface2 : "transparent",
         })}
       >
         <Icon name="Sparkles" size={13} color={c.foregroundMuted} />
-        <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{running ? "Explaining…" : "Explain"}</Text>
+        <Text style={{ ...font.small, color: c.foregroundMuted }}>{running ? "Explaining…" : "Explain"}</Text>
       </Pressable>
       <Modal title="Explanation" open={open} onOpenChange={setOpen}>
         <Modal.Content>
-          <Text style={{ color: c.foreground, fontSize: 13, lineHeight: 19 }}>{result?.explanation ?? ""}</Text>
+          <Text style={{ ...font.body, color: c.foreground }}>{result?.explanation ?? ""}</Text>
           {result?.suggestedFix ? (
-            <View style={{ marginTop: 12, gap: 4 }}>
-              <Text style={{ color: c.foregroundMuted, fontSize: 11, textTransform: "uppercase" }}>Suggested fix</Text>
-              <Text style={{ color: c.foreground, fontSize: 12, fontFamily: "monospace" }}>{result.suggestedFix}</Text>
+            <View style={{ marginTop: space.md, gap: space.xs }}>
+              <Text style={{ ...font.caption, color: c.foregroundMuted, textTransform: "uppercase" }}>Suggested fix</Text>
+              <Text style={{ ...font.small, color: c.foreground, fontFamily: "monospace" }}>{result.suggestedFix}</Text>
             </View>
           ) : null}
         </Modal.Content>
