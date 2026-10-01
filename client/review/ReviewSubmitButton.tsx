@@ -5,6 +5,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { reviewSubmitRpc } from "../../shared/rpc";
 import type { PrTabContext } from "../pr/tab-props";
 import { clearDrafts, dropStaleDrafts, removeDraft, updateDraft, useDrafts } from "./drafts";
+import { markPrReviewed } from "../app/ui-state";
 
 const EVENTS = [
   { event: "APPROVE" as const, label: "Approve" },
@@ -36,6 +37,7 @@ export function ReviewSubmitButton(props: PrTabContext) {
         comments: drafts.map((draft) => ({ path: draft.path, line: draft.line, side: draft.side, body: draft.body })),
       });
       toast.show("Review submitted");
+      markPrReviewed(repo, number);
       clearDrafts(repo, number, headSha);
       setBody("");
       setOpen(false);
