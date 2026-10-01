@@ -73,6 +73,8 @@ function detailWith(anchor: string | null): PrDetail {
     files: [{ path: "src/a.ts", additions: 1, deletions: 0, changeType: "modified", viewed: "UNVIEWED" }],
     threads: [],
     checks: [],
+    reviews: [],
+    reviewRequests: [],
   };
 }
 

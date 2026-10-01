@@ -1,11 +1,22 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dataDir, repoDataFile } from "../core/paths";
-import type { Analysis } from "../../shared/types";
+import { AnalysisSchema, type Analysis } from "../../shared/types";
 
+/**
+ * Bump when the pipeline starts producing data that older cached analyses lack (the UI treats
+ * an older version as "not analyzed yet" and re-runs; see `getAnalysis`). The pipeline still
+ * reads older caches so agent-generated artifacts (summary, visual overview) carry over.
+ *   1: original schema
+ *   2: per-file `outline` and `structuralKind`
+ */
+export const ANALYSIS_VERSION = 2;
+
+/** Latest stored analysis for the PR, any version. Fills schema defaults so older caches still parse. */
 export function loadAnalysis(repo: string, number: number): Analysis | null {
   try {
     const raw = readFileSync(repoDataFile(dataDir("analysis"), repo, number), "utf8");
-    return JSON.parse(raw) as Analysis;
+    const parsed = AnalysisSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }

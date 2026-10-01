@@ -717,7 +717,8 @@ Paseo PRs to:
 - **No library injection** in rich HTML or visual-overview blocks (§9.2, §9.3): Mermaid and
   chart libraries are not injected; `paseo:html` blocks must be self-contained. A Mermaid code
   fence in the normal markdown body is unaffected and still renders on github.com.
-- **Diff viewer is unified-view only** (§6.5); split view is not implemented.
+- **Split (side-by-side) diff view**, the outline diff and structural diffs are specified in
+  `docs/plan-round2.md`.
 - **Desktop keyboard shortcuts** (`j`/`k`/`v`/`n`, §6.5) are not implemented yet.
 - **Mobile HTML rendering** still falls back to markdown, pending the upstream HTML-preview host
   component (§9.1, §14).

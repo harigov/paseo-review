@@ -655,9 +655,9 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   const contexts = basePr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
   const checks = contexts.map((c) => {
     if (c.__typename === "CheckRun") {
-      return { name: c.name, state: mapCheckRunState(c.status, c.conclusion), url: c.url ?? null };
+      return { name: c.name, state: mapCheckRunState(c.status, c.conclusion), url: c.url ?? null, app: null };
     }
-    return { name: c.context, state: mapSearchChecks(c.state), url: c.targetUrl ?? null };
+    return { name: c.context, state: mapSearchChecks(c.state), url: c.targetUrl ?? null, app: null };
   });
 
   // `reviews` is already filtered server-side to this viewer's latest matching review (X8), so
@@ -704,6 +704,9 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
     files: mappedFiles,
     threads,
     checks,
+    // TODO(shell): fetch `latestReviews` / `reviewRequests` and check-run apps for the status panel.
+    reviews: [],
+    reviewRequests: [],
   };
 }
 
