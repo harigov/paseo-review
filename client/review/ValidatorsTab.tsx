@@ -18,6 +18,8 @@ import { addDraft } from "./drafts";
 import { ExplainAction, type ExplainResult } from "./Explain";
 import { validatorScoreboard, ValidatorResultsList } from "./ValidatorResultsList";
 import { Chip, riskColor } from "../ui/chips";
+import { font, space, surfaces } from "../ui/tokens";
+import { Skeleton } from "../ui/states";
 
 const TEMPLATE = `---
 title: New validator
@@ -51,6 +53,7 @@ function slugify(title: string): string {
 export function ValidatorsTab(props: PrTabContext) {
   const { repo, number, theme, analysis, refresh, openTab } = props;
   const c = theme.colors;
+  const s = surfaces(c);
   const toast = useToast();
   const queryClient = useQueryClient();
 
@@ -153,14 +156,14 @@ export function ValidatorsTab(props: PrTabContext) {
     }
   }
 
-  if (!analysis) return <Text style={{ color: c.foregroundMuted, padding: 16 }}>Loading validators…</Text>;
+  if (!analysis) return <Skeleton theme={theme} rows={5} />;
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16 }}>
-      <View style={{ gap: 4 }}>
-        <Text style={{ color: c.foreground, fontSize: 13 }}>{validatorScoreboard(analysis.validators)}</Text>
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: space.lg, gap: space.lg }}>
+      <View style={{ gap: space.xs }}>
+        <Text style={{ ...font.body, color: c.foreground }}>{validatorScoreboard(analysis.validators)}</Text>
         {!analysis.decisionsEnabled ? (
-          <Text style={{ color: c.statusWarning, fontSize: 11 }}>Decision model off for this repo.</Text>
+          <Text style={{ ...font.caption, color: c.statusWarning }}>Decision model off for this repo.</Text>
         ) : null}
       </View>
 
@@ -170,7 +173,7 @@ export function ValidatorsTab(props: PrTabContext) {
         renderFindingActions={(result, finding) => (
           <>
             <Pressable accessibilityRole="button" onPress={() => openFile(finding)}>
-              <Text style={{ color: c.accent, fontSize: 11 }}>Open file</Text>
+              <Text style={{ ...font.caption, color: c.accent }}>Open file</Text>
             </Pressable>
             <ExplainAction
               repo={repo}
@@ -180,18 +183,18 @@ export function ValidatorsTab(props: PrTabContext) {
               onExplained={(res) => setExplanations((prev) => ({ ...prev, [`${result.validatorId}|${finding.unitKey}`]: res }))}
             />
             <Pressable accessibilityRole="button" onPress={() => draftComment(result, finding)}>
-              <Text style={{ color: c.accent, fontSize: 11 }}>Draft comment</Text>
+              <Text style={{ ...font.caption, color: c.accent }}>Draft comment</Text>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => dismiss(result, finding)}>
-              <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>Dismiss</Text>
+              <Text style={{ ...font.caption, color: c.foregroundMuted }}>Dismiss</Text>
             </Pressable>
           </>
         )}
       />
 
-      <View style={{ gap: 8, borderTopWidth: 1, borderColor: c.border, paddingTop: 12 }}>
+      <View style={{ gap: space.sm }}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-          <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>Manage validators</Text>
+          <Text style={{ ...font.title, color: c.foreground }}>Manage validators</Text>
           <Pressable
             accessibilityRole="button"
             onPress={() => {
@@ -199,76 +202,58 @@ export function ValidatorsTab(props: PrTabContext) {
               setTestResult(null);
               setNewValidatorOpen(true);
             }}
-            style={{ flexDirection: "row", gap: 4, alignItems: "center" }}
+            style={{ flexDirection: "row", gap: space.xs, alignItems: "center" }}
           >
             <Icon name="Plus" size={13} color={c.accent} />
-            <Text style={{ color: c.accent, fontSize: 12 }}>New validator</Text>
+            <Text style={{ ...font.small, color: c.accent }}>New validator</Text>
           </Pressable>
         </View>
-        {(manageQuery.data?.validators ?? []).map((validator) => (
-          <View
-            key={validator.id}
-            style={{ flexDirection: "row", alignItems: "center", gap: 8, padding: 8, borderWidth: 1, borderColor: c.border, borderRadius: 6 }}
-          >
-            <Switch value={validator.enabled} onValueChange={(value) => toggle(validator.id, value)} />
-            <Text style={{ color: c.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
-              {validator.title}
-            </Text>
-            <Chip label={validator.severity} color={SEVERITY_COLOR[validator.severity](c)} />
-            <Chip label={validator.source} color={c.foregroundMuted} />
+        {(manageQuery.data?.validators ?? []).length === 0 ? (
+          <Text style={{ ...font.small, color: c.foregroundMuted }}>No validators found under .paseo/validators.</Text>
+        ) : (
+          <View style={s.card}>
+            {(manageQuery.data?.validators ?? []).map((validator, index) => (
+              <View key={validator.id}>
+                {index > 0 ? <View style={{ ...s.hairline, marginBottom: space.sm }} /> : null}
+                <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+                  <Switch value={validator.enabled} onValueChange={(value) => toggle(validator.id, value)} />
+                  <Text style={{ ...font.small, color: c.foreground, flex: 1 }} numberOfLines={1}>
+                    {validator.title}
+                  </Text>
+                  <Chip label={validator.severity} color={SEVERITY_COLOR[validator.severity](c)} />
+                  <Chip label={validator.source} color={c.foregroundMuted} />
+                </View>
+              </View>
+            ))}
           </View>
-        ))}
+        )}
       </View>
 
       <Modal title="New validator" open={newValidatorOpen} onOpenChange={setNewValidatorOpen}>
         <Modal.Content>
-          <View style={{ gap: 10 }}>
+          <View style={{ gap: space.md }}>
             <TextInput
               value={draftMarkdown}
               onChangeText={setDraftMarkdown}
               multiline
-              style={{
-                minHeight: 220,
-                color: c.foreground,
-                borderWidth: 1,
-                borderColor: c.border,
-                borderRadius: 6,
-                padding: 8,
-                fontSize: 12,
-                fontFamily: "monospace",
-              }}
+              style={{ ...s.input, minHeight: 220, fontFamily: "monospace" }}
             />
-            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-              <Pressable
-                accessibilityRole="button"
-                disabled={testing}
-                onPress={testValidator}
-                style={{ paddingVertical: 6, paddingHorizontal: 10, backgroundColor: c.surface2, borderRadius: 6 }}
-              >
-                <Text style={{ color: c.foreground, fontSize: 12 }}>{testing ? `Testing… ${testJob.job?.stage ?? ""}` : "Test on this PR"}</Text>
+            <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+              <Pressable accessibilityRole="button" disabled={testing} onPress={testValidator} style={s.buttonQuiet}>
+                <Text style={s.buttonQuietText}>{testing ? `Testing… ${testJob.job?.stage ?? ""}` : "Test on this PR"}</Text>
               </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                disabled={saving}
-                onPress={() => saveValidator("repo")}
-                style={{ paddingVertical: 6, paddingHorizontal: 10, backgroundColor: c.accent, borderRadius: 6 }}
-              >
-                <Text style={{ color: c.accentForeground, fontSize: 12 }}>Save to repo</Text>
+              <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveValidator("repo")} style={s.button}>
+                <Text style={s.buttonText}>Save to repo</Text>
               </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                disabled={saving}
-                onPress={() => saveValidator("personal")}
-                style={{ paddingVertical: 6, paddingHorizontal: 10, backgroundColor: c.surface2, borderRadius: 6 }}
-              >
-                <Text style={{ color: c.foreground, fontSize: 12 }}>Save to my library</Text>
+              <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveValidator("personal")} style={s.buttonQuiet}>
+                <Text style={s.buttonQuietText}>Save to my library</Text>
               </Pressable>
             </View>
             {testResult ? (
-              <View style={{ gap: 4 }}>
-                <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>Result: {testResult.status}</Text>
+              <View style={{ gap: space.xs }}>
+                <Text style={{ ...font.caption, color: c.foregroundMuted }}>Result: {testResult.status}</Text>
                 {testResult.findings.map((finding, index) => (
-                  <Text key={index} style={{ color: c.foreground, fontSize: 11 }}>
+                  <Text key={index} style={{ ...font.caption, color: c.foreground }}>
                     {finding.path ?? "pr"}:{finding.startLine ?? "-"} — {Math.round(finding.probability * 100)}%
                   </Text>
                 ))}

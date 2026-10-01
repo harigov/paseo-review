@@ -1,10 +1,12 @@
-import { Pressable, Text, View } from "react-native";
+import { View } from "react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useToast } from "@getpaseo/plugin/client/react-native";
 import type { PrTabContext } from "../pr/tab-props";
 import { useJobRunner } from "../data/hooks";
 import { HtmlView } from "../render/HtmlView";
 import { agentTaskRpc } from "../../shared/rpc";
+import { space } from "../ui/tokens";
+import { EmptyState, InlineLoading } from "../ui/states";
 
 export function VisualTab(props: PrTabContext) {
   const { theme, repo, number, analysis, refresh } = props;
@@ -25,25 +27,26 @@ export function VisualTab(props: PrTabContext) {
 
   if (analysis?.visualOverviewHtml) {
     return (
-      <View style={{ flex: 1, backgroundColor: c.surface0, padding: 16 }}>
+      <View style={{ flex: 1, backgroundColor: c.surface0, padding: space.lg }}>
         <HtmlView html={analysis.visualOverviewHtml} theme={theme} height="flex" />
       </View>
     );
   }
 
   return (
-    <View style={{ flex: 1, padding: 24, gap: 12, backgroundColor: c.surface0 }}>
-      <Text style={{ color: c.foreground, fontSize: 14, lineHeight: 20 }}>
-        No visual overview yet. Generate one with your configured agent to get a diagram of what changed and why.
-      </Text>
-      <Pressable
-        accessibilityRole="button"
-        disabled={job.running}
-        onPress={generate}
-        style={{ alignSelf: "flex-start", paddingHorizontal: 14, paddingVertical: 9, borderRadius: 6, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border }}
-      >
-        <Text style={{ color: c.foreground, fontSize: 13 }}>{job.running ? `Generating… ${job.job?.stage ?? ""}` : "Generate visual overview"}</Text>
-      </Pressable>
+    <View style={{ flex: 1, backgroundColor: c.surface0, justifyContent: "center" }}>
+      {job.running ? (
+        <InlineLoading theme={theme} label={`Generating… ${job.job?.stage ?? ""}`} />
+      ) : (
+        <EmptyState
+          theme={theme}
+          icon="Workflow"
+          title="No visual overview yet"
+          hint="Generate one with your configured agent to get a diagram of what changed and why."
+          actionLabel="Generate visual overview"
+          onAction={generate}
+        />
+      )}
     </View>
   );
 }
