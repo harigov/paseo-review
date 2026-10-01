@@ -1,4 +1,4 @@
-import { useMemo, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 /** A draft review comment, kept client-side until the review is submitted. */
 export interface DraftComment {
@@ -108,8 +108,3 @@ export function useDrafts(repo: string, number: number, headSha: string): DraftC
   );
 }
 
-/** Live drafts for one file within a PR at its current head (e.g. for the diff viewer). */
-export function useFileDrafts(repo: string, number: number, headSha: string, path: string): DraftComment[] {
-  const drafts = useDrafts(repo, number, headSha);
-  return useMemo(() => drafts.filter((draft) => draft.path === path), [drafts, path]);
-}

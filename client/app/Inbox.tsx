@@ -33,7 +33,7 @@ const SECTION_LABELS: Record<ClientSection, string> = {
 };
 
 type Row =
-  | { kind: "header"; section: ClientSection; count: number }
+  | { kind: "header"; section: ClientSection; count: number; first: boolean }
   | { kind: "pr"; key: string; pr: PrSummary }
   /** A PR opened in this app that no inbox search returned (e.g. merged long ago): title only. */
   | { kind: "recentLite"; key: string; recent: RecentPr };
@@ -54,6 +54,7 @@ const REVIEW_LABEL: Record<ReviewDecision, string> = {
 /** A PR needs the viewer's attention: a review was explicitly requested, the diff moved since
  * their last review, or they're assigned to an open PR they haven't already requested changes on. */
 function isNeedsYou(pr: PrSummary): boolean {
+  if (pr.state !== "OPEN") return false;
   if (pr.sections.includes("review_requested")) return true;
   if (pr.changedSinceMyReview !== null && pr.changedSinceMyReview > 0) return true;
   if (pr.sections.includes("assigned") && pr.reviewDecision !== "CHANGES_REQUESTED" && pr.state === "OPEN") return true;
@@ -153,6 +154,15 @@ export function Inbox({
   const [ciFilter, setCiFilter] = useRememberedFilter("ci", inboxFilters.ci);
   const [reviewFilter, setReviewFilter] = useRememberedFilter("review", inboxFilters.review);
   const [sort, setSort] = useRememberedFilter("sort", inboxFilters.sort);
+
+  // A remembered repo filter for a repo that is no longer a Paseo project would hide every PR
+  // with no visible chip to clear it; drop it once the repo list is known.
+  useEffect(() => {
+    const known = repos.data?.repos;
+    if (!known || !repoFilter) return;
+    if (!known.some((repo) => repo.slug === repoFilter)) setRepoFilter(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repos.data, repoFilter]);
   const [errorsDismissed, setErrorsDismissed] = useState(false);
   const searchInputRef = useRef<TextInput>(null);
 
@@ -276,7 +286,7 @@ export function Inbox({
     const out: Row[] = [];
     for (const { section, items } of sectionsData) {
       if (items.length === 0) continue;
-      out.push({ kind: "header", section, count: items.length });
+      out.push({ kind: "header", section, count: items.length, first: out.length === 0 });
       if (!collapsed[section]) out.push(...items);
     }
     return out;
@@ -366,11 +376,26 @@ export function Inbox({
         <Skeleton theme={theme} rows={6} lineHeight={64} widths={["100%", "100%", "100%", "100%", "100%", "100%"]} />
       ) : inbox.isError ? (
         <ErrorState theme={theme} message="Could not load the inbox." onRetry={() => inbox.refresh()} />
-      ) : totalPrRows === 0 ? (
+      ) : totalPrRows === 0 && prs.length === 0 ? (
         <EmptyState
           theme={theme}
           title="No pull requests"
           hint="PR Review pulls pull requests from repos already added to Paseo as projects with a github.com remote. Add a repo as a Paseo project to see its PRs here."
+        />
+      ) : totalPrRows === 0 ? (
+        <EmptyState
+          theme={theme}
+          icon="Filter"
+          title="No pull requests match"
+          hint="Your search or filters hide every open PR."
+          actionLabel="Clear filters"
+          onAction={() => {
+            setSearch("");
+            setRepoFilter(() => null);
+            setHideDrafts(() => false);
+            setCiFilter(() => "any");
+            setReviewFilter(() => "any");
+          }}
         />
       ) : (
         <FlatList
@@ -389,7 +414,7 @@ export function Inbox({
                     alignItems: "center",
                     gap: space.sm,
                     paddingVertical: space.sm + 2,
-                    marginTop: item.section === SECTION_ORDER[0] ? 0 : space.xs + 2,
+                    marginTop: item.first ? 0 : space.xs + 2,
                   }}
                 >
                   <Icon name={isCollapsed ? "ChevronRight" : "ChevronDown"} size={14} color={c.foregroundMuted} />

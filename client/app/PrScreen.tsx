@@ -192,8 +192,10 @@ export function PrScreen(
       nonNoiseFiles
         // DISMISSED = viewed once but changed since; it needs another look, so it is a target too.
         .filter((file) => file.viewed !== "VIEWED")
+        // Only files the module tab will actually show under the current filter.
+        .filter((file) => !sinceLastReview || file.changedSinceLastReview)
         .sort((a, b) => a.order[readingOrder] - b.order[readingOrder])[0] ?? null,
-    [nonNoiseFiles, readingOrder],
+    [nonNoiseFiles, readingOrder, sinceLastReview],
   );
   const goToNextUnviewed = useCallback(() => {
     if (!nextUnviewed) return;
