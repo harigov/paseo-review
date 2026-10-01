@@ -1,6 +1,6 @@
 import { LineCounter, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import type { StructuralDiff, StructuralEntry, StructuralKind } from "../../../shared/types";
-import { STRUCTURAL_ENTRY_CAP, shortReason } from "./util";
+import { JSON_DIRECT_PARSE_BYTES, STRUCTURAL_ENTRY_CAP, STRUCTURAL_MAX_BYTES, STRUCTURAL_TOO_LARGE_MESSAGE, YAML_MAX_BYTES, shortReason } from "./util";
 
 // JSON / YAML structural diff. Both are parsed with the `yaml` package so every node carries a
 // 1-based line number; a .json file whose content the YAML parser can't handle falls back to
@@ -64,7 +64,11 @@ function fromJson(value: unknown): TNode {
   return { kind: "map", entries, line: null };
 }
 
-function parseSide(text: string, kind: StructuralKind): TNode {
+function parseSide(text: string, kind: StructuralKind, forceJsonDirect: boolean): TNode {
+  // Above JSON_DIRECT_PARSE_BYTES for a .json file: skip the ~10x slower `yaml`-based parser (it
+  // only buys us line numbers) and parse directly. Both sides are forced together so an entry's
+  // oldLine/newLine are consistently null rather than populated on just the smaller side.
+  if (kind === "json" && forceJsonDirect) return fromJson(JSON.parse(text));
   const lineCounter = new LineCounter();
   const doc = parseDocument(text, { lineCounter });
   // Diffing only the first document of a multi-document YAML stream is acceptable for v1; the
@@ -229,9 +233,22 @@ function topLevelChildren(node: TNode): Array<{ path: string; child: Child }> {
 
 export function diffJsonYaml(path: string, kind: StructuralKind, oldText: string | null, newText: string | null): StructuralDiff {
   const base = { path, kind, format: null as string | null };
+
+  const oldBytes = oldText === null ? 0 : Buffer.byteLength(oldText, "utf8");
+  const newBytes = newText === null ? 0 : Buffer.byteLength(newText, "utf8");
+  const maxBytes = Math.max(oldBytes, newBytes);
+  // YAML gets a lower ceiling than JSON (the LineCounter-driven parser is far slower), so a YAML
+  // file between YAML_MAX_BYTES and STRUCTURAL_MAX_BYTES is rejected here same as any file over
+  // STRUCTURAL_MAX_BYTES, with the same message.
+  const sizeCap = kind === "yaml" ? YAML_MAX_BYTES : STRUCTURAL_MAX_BYTES;
+  if (maxBytes > sizeCap) {
+    return { ...base, entries: [], truncated: false, error: STRUCTURAL_TOO_LARGE_MESSAGE };
+  }
+  const forceJsonDirect = kind === "json" && maxBytes > JSON_DIRECT_PARSE_BYTES;
+
   try {
-    const oldRoot = oldText === null ? null : parseSide(oldText, kind);
-    const newRoot = newText === null ? null : parseSide(newText, kind);
+    const oldRoot = oldText === null ? null : parseSide(oldText, kind, forceJsonDirect);
+    const newRoot = newText === null ? null : parseSide(newText, kind, forceJsonDirect);
     const out: StructuralEntry[] = [];
     const budget: Budget = { truncated: false };
 
