@@ -130,6 +130,57 @@ inline.
 Inbox PR rows: padding 12→14, inner gap 4→6, list gap 6→10, section headers more breathing
 room. Conversations: author 11→12, body 12→14 rendered as markdown.
 
+## Round 2b: review experience follow-ups
+
+Added after the first batch, same deterministic rules.
+
+| # | Workstream | Owner files |
+|---|---|---|
+| G | Markdown/HTML renderer rewrite | `client/render/Markdown.tsx`, `client/render/html-subset.ts`, `client/render/markdown-text.ts` |
+| H | GitHub-rendered HTML view | `client/render/GithubHtmlView.tsx`, `client/render/github-css.ts`, `client/render/html-web.tsx` |
+| I | Persisted UI state and recents | `shared/ui-state.ts`, `server/ui-state/`, `client/app/ui-state.ts`, `client/app/App.tsx` |
+| J | Side-panel chat | `client/review/ChatPanel.tsx`, `client/review/chat-timeline.ts` |
+| K | Review comments | `client/diff/FileDiffView.tsx`, `client/review/drafts.ts`, `client/review/ReviewSubmitButton.tsx`, `server/github/comments.ts` |
+
+### Description and comment rendering
+- `PrDetail.bodyHtml` and `ThreadComment.bodyHtml` carry GitHub's rendered HTML (`bodyHTML`).
+  On web the Overview shows the description through `GithubHtmlView`: a sandboxed iframe
+  (`allow-scripts` only, CSP with `img-src https:` and nothing else) with a GitHub-like
+  stylesheet built from the theme colours, auto-sized through a height message and with link
+  clicks forwarded to the external opener. Native falls back to the markdown renderer.
+- The markdown renderer (`Markdown`) handles GitHub's sanitised HTML subset natively so bot
+  comments (Cursor Bugbot, Copilot, CodeRabbit) read well everywhere: HTML comments are
+  stripped, `<details>` becomes a collapsible, `<picture>`/`<img>`/image links render as sized
+  images, `<sup>`/`<kbd>`/`<b>`/… map to inline styles, entities are decoded, GitHub alerts,
+  task lists, content-sized tables, intrinsic-size images, and `@mention` / `#123` links.
+
+### Remembering state
+- `prr.ui.get` / `prr.ui.set` persist `{ lastLocation, recentPrs }` under the plugin data dir.
+  The client store hydrates once per session and persists debounced; `App` restores the last PR
+  and `PrScreen` restores the last tab. Recents (max 20) record every PR opened here, with
+  `reviewedAt` set on review submit.
+- Inbox section "Recently reviewed", first: local recents (full cards when a search returned
+  the PR, title-only cards otherwise) merged with GitHub's `reviewed-by:@me` search (any state,
+  so merged PRs you reviewed stay listed).
+
+### Review comments
+- Every code line has a "+" gutter (hover-lit on web, always visible on compact); drafts render
+  inline under their line with Edit/Delete; the composer offers "Add to review" (pending
+  review, submitted with the Review button) or "Comment now" (`prr.comment.create`, a single
+  review comment on the head commit). Own comments get Edit/Delete (`prr.comment.update` /
+  `prr.comment.delete`, delete needs a confirming second tap); threads get an inline Reply.
+- The submit modal lets drafts be edited in place; "Comment" is disabled with nothing to send.
+
+### Chat
+- "Chat" opens a panel on the PR screen instead of navigating to the agent view. The panel
+  starts or reuses the PR's agent (same worktree workspace and read-only MCP tools as before),
+  subscribes to its timeline through the client daemon API (`usePaseo().agents.ref(id)`), and
+  sends messages in place; "Open in Paseo" is still available.
+
+### Whitespace
+- Code lines keep whitespace (`white-space: pre` on web), tabs expand to 4 columns before
+  highlighting, and whitespace-only lines show `·` / `→` markers so the change is visible.
+
 ## Verification
 
 Each stream: `npm run typecheck`, `npx vitest run`, `npm run check:bundle`. Server streams add
@@ -142,3 +193,6 @@ unit-tested; the final integration pass runs all three checks on the merged bran
 - tree-sitter extractors behind the outline interface.
 - Declarations as a validator unit.
 - Bot issue comments (not reviews) in the status panel.
+- Scroll-to-declaration from an outline row (needs a scroll API on the diff viewer).
+- Multi-line declaration headers: the signature is the first header line only, so a parameter
+  change on a later line reports as "modified" rather than "signature".

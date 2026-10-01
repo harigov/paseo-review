@@ -9,8 +9,24 @@ A [Paseo](https://paseo.sh) plugin for reviewing large GitHub pull requests.
   risk, complexity and viewed progress.
 - **Reading order:** foundations first (definitions before use), riskiest first, or
   chronological.
-- **Diff viewer:** fast scrolling on huge files, moved-code detection, whitespace-only and
-  pure-move collapse, syntax highlighting, inline threads and validator findings.
+- **Diff viewer:** inline or side-by-side, fast scrolling on huge files, moved-code detection,
+  whitespace-only and pure-move collapse (with visible whitespace markers when expanded),
+  syntax highlighting, inline threads and validator findings.
+- **Review comments:** a "+" on every line, drafts shown inline with edit and delete, "Add to
+  review" or "Comment now", reply from the diff, and edit or delete your own comments.
+- **Outline diff:** per file, which functions, classes and types were added, removed,
+  modified, renamed, moved or had their signature changed (TypeScript/JavaScript, Python, Go,
+  Rust, Java, Kotlin, Ruby). The Overview lists exported declarations whose signature changed.
+- **Structural diff:** lockfiles (npm, pnpm, yarn, Cargo, poetry, go.sum, Bundler, Composer,
+  Pipenv) and JSON/YAML files as before/after tables instead of text.
+- **Status panel:** reviews by humans and bots, outstanding review requests, CI checks grouped
+  by app, and the validator scoreboard, on the right of the PR screen.
+- **Descriptions and comments** render GitHub's own HTML (desktop), with a native markdown
+  renderer that understands the HTML bots embed in comments elsewhere.
+- **Remembers where you were:** reopening PR Review returns to the last PR and tab, and the
+  inbox starts with a "Recently reviewed" section.
+- **Chat in a side panel** of the PR screen, with the PR agent's tools, instead of leaving the
+  review.
 - **Viewed state synced with GitHub's "Viewed" checkbox.** A file that changed after you viewed
   it shows only what changed since then, labelled substantive or trivial.
 - **Since my last review:** filters to files changed since your last submitted review and
@@ -89,6 +105,9 @@ from your Paseo agent profiles and available providers.
 
 **Precompute.** Interval, daily agent budget, skip drafts and size cap.
 
+**Reading and diff.** Default reading order and default diff layout (inline or split); both can
+be toggled per PR in the PR screen header.
+
 ## Repo configuration (optional)
 
 `.paseo/review.yml` overrides the modules and file rules:
@@ -147,5 +166,5 @@ npm run check:bundle   # esbuild bundle check mirroring Paseo's plugin compiler
 npm test               # vitest
 ```
 
-See [docs/plan.md](docs/plan.md) for the design and [THIRD_PARTY.md](THIRD_PARTY.md) for
-attributions.
+See [docs/plan.md](docs/plan.md) and [docs/plan-round2.md](docs/plan-round2.md) for the design
+and [THIRD_PARTY.md](THIRD_PARTY.md) for attributions.
