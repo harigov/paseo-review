@@ -1,4 +1,6 @@
 import type { StructuralDiff, StructuralKind } from "../../shared/types";
+import { diffJsonYaml } from "./structural/json-yaml";
+import { diffLockfile } from "./structural/lockfiles";
 
 // Structural (table) diffs for files that read badly as text: lockfiles, JSON and YAML.
 // Deterministic, no model involvement. `structuralKindFor` runs in the analysis pipeline for
@@ -38,18 +40,22 @@ export function structuralKindFor(path: string): StructuralKind | null {
 
 /**
  * Computes the structural diff of one file between base and head. `oldText` / `newText` are
- * null when the file is absent on that side (added / deleted file).
+ * null when the file is absent on that side (added / deleted file). Synchronous, pure, and
+ * never throws: any parse failure on either side is reported via `error` with empty entries so
+ * the client can fall back to the text diff.
  */
 export function computeStructuralDiff(path: string, kind: StructuralKind, oldText: string | null, newText: string | null): StructuralDiff {
-  void oldText;
-  void newText;
-  // TODO(structural-server): implement lockfile, JSON and YAML diffs.
-  return {
-    path,
-    kind,
-    format: kind === "lockfile" ? lockfileFormat(path) : null,
-    entries: [],
-    truncated: false,
-    error: "Structural diff is not implemented yet.",
-  };
+  try {
+    if (kind === "lockfile") return diffLockfile(path, lockfileFormat(path), oldText, newText);
+    return diffJsonYaml(path, kind, oldText, newText);
+  } catch (err) {
+    return {
+      path,
+      kind,
+      format: kind === "lockfile" ? lockfileFormat(path) : null,
+      entries: [],
+      truncated: false,
+      error: err instanceof Error ? err.message.split("\n")[0] : "Structural diff failed.",
+    };
+  }
 }
