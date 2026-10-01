@@ -190,7 +190,8 @@ export function PrScreen(
   const nextUnviewed = useMemo(
     () =>
       nonNoiseFiles
-        .filter((file) => file.viewed === "UNVIEWED")
+        // DISMISSED = viewed once but changed since; it needs another look, so it is a target too.
+        .filter((file) => file.viewed !== "VIEWED")
         .sort((a, b) => a.order[readingOrder] - b.order[readingOrder])[0] ?? null,
     [nonNoiseFiles, readingOrder],
   );
