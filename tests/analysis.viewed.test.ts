@@ -65,6 +65,7 @@ function detailWith(anchor: string | null): PrDetail {
       changedSinceMyReview: null,
     },
     body: "",
+    bodyHtml: "",
     nodeId: "node1",
     baseSha,
     commits: 1,

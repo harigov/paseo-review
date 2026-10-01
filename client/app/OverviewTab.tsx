@@ -7,6 +7,7 @@ import type { AnalyzedFile, OutlineEntry } from "../../shared/types";
 import { useJobRunner } from "../data/hooks";
 import { Markdown } from "../render/Markdown";
 import { HtmlView } from "../render/HtmlView";
+import { GithubHtmlView } from "../render/GithubHtmlView";
 import { agentTaskRpc } from "../../shared/rpc";
 import { extractRichHtml, stripRichHtml } from "../../shared/rich-html";
 import { Chip } from "../ui/chips";
@@ -121,7 +122,11 @@ export function OverviewTab(props: PrTabContext) {
           </>
         ) : (
           <>
-            <Markdown body={markdownBody} theme={theme} baseUrl={baseUrl} />
+            {detail.bodyHtml ? (
+              <GithubHtmlView html={detail.bodyHtml} markdown={markdownBody} theme={theme} baseUrl={baseUrl} />
+            ) : (
+              <Markdown body={markdownBody} theme={theme} baseUrl={baseUrl} />
+            )}
             {richHtml && (
               <Pressable accessibilityRole="button" onPress={() => setShowMarkdown(false)}>
                 <Text style={{ color: c.accent, fontSize: 12 }}>Show rich description</Text>

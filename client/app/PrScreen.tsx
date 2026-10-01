@@ -16,6 +16,7 @@ import { ModuleTab } from "../review/ModuleTab";
 import { ValidatorsTab } from "../review/ValidatorsTab";
 import { ConversationsTab } from "../review/ConversationsTab";
 import { ReviewSubmitButton } from "../review/ReviewSubmitButton";
+import { recordRecentPr, rememberPrTab, useLastLocation } from "./ui-state";
 import { StatusPanel } from "../review/StatusPanel";
 
 const READING_ORDERS: { id: ReadingOrder; label: string }[] = [
@@ -39,7 +40,18 @@ export function PrScreen(
   const chatRunner = useJobRunner();
   const triedHeadRef = useRef<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState("overview");
+  // Reopen the tab the user was on when this PR was last shown (persisted across remounts).
+  const lastLocation = useLastLocation();
+  const [activeTab, setActiveTab] = useState(() =>
+    lastLocation.kind === "pr" && lastLocation.repo === repo && lastLocation.number === number && lastLocation.tab ? lastLocation.tab : "overview",
+  );
+  const selectTab = useCallback(
+    (tabId: string) => {
+      setActiveTab(tabId);
+      rememberPrTab(repo, number, tabId);
+    },
+    [repo, number],
+  );
   const [readingOrder, setReadingOrder] = useState<ReadingOrder>("foundations");
   const [diffLayout, setDiffLayout] = useState<DiffLayout>("inline");
   const [sinceLastReview, setSinceLastReview] = useState(false);
@@ -58,6 +70,12 @@ export function PrScreen(
 
   const detail = detailQuery.data ?? null;
   const analysis = analysisQuery.data?.analysis ?? null;
+
+  // The inbox only knows repo/number when it opens a PR; refresh the recents entry with the title.
+  const title = detail?.summary.title;
+  useEffect(() => {
+    if (title) recordRecentPr({ repo, number, title });
+  }, [repo, number, title]);
 
   useEffect(() => {
     const headSha = detail?.summary.headSha;
@@ -142,9 +160,9 @@ export function PrScreen(
       refresh,
       reanalyze,
       openChat,
-      openTab: setActiveTab,
+      openTab: selectTab,
     }),
-    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, diffLayout, refresh, reanalyze, openChat],
+    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, diffLayout, refresh, reanalyze, openChat, selectTab],
   );
 
   const moduleTabs = useMemo(() => {
@@ -214,7 +232,7 @@ export function PrScreen(
           <Pressable
             key={tab.id}
             accessibilityRole="button"
-            onPress={() => setActiveTab(tab.id)}
+            onPress={() => selectTab(tab.id)}
             style={({ pressed }) => ({
               flexDirection: "row",
               alignItems: "center",

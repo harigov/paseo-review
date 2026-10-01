@@ -57,6 +57,8 @@ export const ThreadCommentSchema = z.object({
   id: z.string(),
   author: z.string(),
   body: z.string(),
+  /** GitHub-rendered HTML of `body` (mentions, emoji, task lists resolved); "" when unavailable. */
+  bodyHtml: z.string(),
   createdAt: z.string(),
   url: z.string(),
 });
@@ -123,6 +125,8 @@ export type PrCheck = z.infer<typeof PrCheckSchema>;
 export const PrDetailSchema = z.object({
   summary: PrSummarySchema,
   body: z.string(),
+  /** GitHub-rendered HTML of the description; "" when unavailable. */
+  bodyHtml: z.string(),
   nodeId: z.string(),
   baseSha: z.string(),
   commits: z.number(),

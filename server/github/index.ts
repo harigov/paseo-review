@@ -503,6 +503,7 @@ interface CommentNode {
   id: string;
   author: { login: string } | null;
   body: string;
+  bodyHTML: string | null;
   createdAt: string;
   url: string;
 }
@@ -537,6 +538,7 @@ interface PrQueryResult {
   headRefOid: string;
   baseRefOid: string;
   body: string | null;
+  bodyHTML: string | null;
   labels: { nodes: Array<{ name: string }> } | null;
   commits: {
     totalCount: number;
@@ -556,7 +558,7 @@ interface PrQueryResult {
 
 const THREAD_FIELDS = `
   id isResolved isOutdated path line originalLine diffSide
-  comments(first: 50) { pageInfo { hasNextPage endCursor } nodes { id author { login } body createdAt url } }
+  comments(first: 50) { pageInfo { hasNextPage endCursor } nodes { id author { login } body bodyHTML createdAt url } }
 `;
 
 /** Full PR fetch: core fields plus the first page each of files and review threads. */
@@ -570,6 +572,7 @@ function buildPrCoreQuery(owner: string, name: string, number: number, viewerLog
           createdAt updatedAt additions deletions changedFiles reviewDecision
           baseRefName headRefName headRefOid baseRefOid
           body
+          bodyHTML
           labels(first: 10) { nodes { name } }
           commits(last: 1) {
             totalCount
@@ -659,7 +662,7 @@ function buildThreadCommentsPageQuery(threadId: string, after: string): string {
         ... on PullRequestReviewThread {
           comments(first: 50, after: ${gqlString(after)}) {
             pageInfo { hasNextPage endCursor }
-            nodes { id author { login } body createdAt url }
+            nodes { id author { login } body bodyHTML createdAt url }
           }
         }
       }
@@ -728,6 +731,7 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
       id: c.id,
       author: c.author?.login ?? "ghost",
       body: c.body ?? "",
+      bodyHtml: c.bodyHTML ?? "",
       createdAt: c.createdAt,
       url: c.url,
     })),
@@ -792,6 +796,7 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   return {
     summary,
     body: basePr.body ?? "",
+    bodyHtml: basePr.bodyHTML ?? "",
     nodeId: basePr.id,
     baseSha: basePr.baseRefOid,
     commits: basePr.commits?.totalCount ?? 0,
