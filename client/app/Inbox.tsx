@@ -225,7 +225,7 @@ export function Inbox({
         <FlatList
           data={rows}
           keyExtractor={(row: Row) => (row.kind === "header" ? `h:${row.section}` : row.key)}
-          contentContainerStyle={{ padding: 12, gap: 6 }}
+          contentContainerStyle={{ padding: 12, gap: 10 }}
           renderItem={({ item }: { item: Row }) => {
             if (item.kind === "header") {
               const isCollapsed = !!collapsed[item.section];
@@ -233,7 +233,13 @@ export function Inbox({
                 <Pressable
                   accessibilityRole="button"
                   onPress={() => setCollapsed((cur) => ({ ...cur, [item.section]: !cur[item.section] }))}
-                  style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8 }}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 8,
+                    paddingVertical: 10,
+                    marginTop: item.section === "mine" ? 0 : 6,
+                  }}
                 >
                   <Icon name={isCollapsed ? "ChevronRight" : "ChevronDown"} size={14} color={c.foregroundMuted} />
                   <Text style={{ color: c.foreground, fontSize: 13, fontWeight: "600" }}>
@@ -250,33 +256,33 @@ export function Inbox({
                 accessibilityRole="button"
                 onPress={() => onOpenPr({ repo: pr.repo, number: pr.number })}
                 style={({ pressed }) => ({
-                  padding: 12,
+                  padding: 14,
                   borderRadius: 8,
                   borderWidth: 1,
                   borderColor: c.border,
                   backgroundColor: pressed ? c.surface2 : c.surface1,
-                  gap: 4,
+                  gap: 6,
                 })}
               >
-                <Text numberOfLines={2} style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>
+                <Text numberOfLines={2} style={{ color: c.foreground, fontSize: 14, fontWeight: "600", lineHeight: 20 }}>
                   {pr.title}
                 </Text>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
                     {pr.repo}#{pr.number} · {pr.author} · {relativeAge(pr.updatedAt)}
                   </Text>
-                  {pr.isDraft && <Text style={{ color: c.foregroundMuted, backgroundColor: c.surface2, borderRadius: 4, fontSize: 11, paddingHorizontal: 5 }}>Draft</Text>}
+                  {pr.isDraft && <Text style={{ color: c.foregroundMuted, backgroundColor: c.surface2, borderRadius: 4, fontSize: 12, paddingHorizontal: 5 }}>Draft</Text>}
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: ciColor }} />
-                  {!!REVIEW_LABEL[pr.reviewDecision] && <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{REVIEW_LABEL[pr.reviewDecision]}</Text>}
-                  <Text style={{ color: c.statusSuccess, fontSize: 11 }}>+{pr.additions}</Text>
-                  <Text style={{ color: c.statusDanger, fontSize: 11 }}>-{pr.deletions}</Text>
-                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{pr.changedFiles} files</Text>
-                  {pr.unresolvedThreads > 0 && <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>{pr.unresolvedThreads} unresolved</Text>}
+                  {!!REVIEW_LABEL[pr.reviewDecision] && <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{REVIEW_LABEL[pr.reviewDecision]}</Text>}
+                  <Text style={{ color: c.statusSuccess, fontSize: 12 }}>+{pr.additions}</Text>
+                  <Text style={{ color: c.statusDanger, fontSize: 12 }}>-{pr.deletions}</Text>
+                  <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{pr.changedFiles} files</Text>
+                  {pr.unresolvedThreads > 0 && <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{pr.unresolvedThreads} unresolved</Text>}
                   {pr.severity !== null && (
-                    <Text style={{ color: c.foreground, backgroundColor: c.surface2, borderRadius: 4, fontSize: 11, paddingHorizontal: 5 }}>Sev {pr.severity}</Text>
+                    <Text style={{ color: c.foreground, backgroundColor: c.surface2, borderRadius: 4, fontSize: 12, paddingHorizontal: 5 }}>Sev {pr.severity}</Text>
                   )}
                   {pr.changedSinceMyReview !== null && pr.changedSinceMyReview > 0 && (
-                    <Text style={{ color: c.accent, fontSize: 11 }}>{pr.changedSinceMyReview} changed since your review</Text>
+                    <Text style={{ color: c.accent, fontSize: 12 }}>{pr.changedSinceMyReview} changed since your review</Text>
                   )}
                 </View>
               </Pressable>

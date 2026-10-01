@@ -7,6 +7,7 @@ import type { AnalyzedFile, Thread, ThreadTriage } from "../../shared/types";
 import type { PrTabContext } from "../pr/tab-props";
 import { ExplainAction } from "./Explain";
 import { Chip } from "../ui/chips";
+import { Markdown } from "../render/Markdown";
 
 const TRIAGE_LABEL: Record<ThreadTriage, string> = {
   addressed: "Addressed",
@@ -93,6 +94,8 @@ export function ConversationsTab(props: PrTabContext) {
 
   if (!detail) return <Text style={{ color: c.foregroundMuted, padding: 16 }}>Loading conversations…</Text>;
 
+  const baseUrl = detail.summary.url;
+
   function renderRow({ item }: { item: Row }) {
     if (item.kind === "header") {
       return (
@@ -114,9 +117,9 @@ export function ConversationsTab(props: PrTabContext) {
           {text ? <Chip label={text} color={c.accent} /> : null}
         </View>
         {thread.comments.map((comment) => (
-          <View key={comment.id} style={{ gap: 1 }}>
-            <Text style={{ color: c.foregroundMuted, fontSize: 11, fontWeight: "600" }}>{comment.author}</Text>
-            <Text style={{ color: c.foreground, fontSize: 12 }}>{comment.body}</Text>
+          <View key={comment.id} style={{ gap: 4, borderLeftWidth: 2, borderColor: c.border, paddingLeft: 8 }}>
+            <Text style={{ color: c.foregroundMuted, fontSize: 12, fontWeight: "600" }}>{comment.author}</Text>
+            <Markdown body={comment.body} theme={theme} baseUrl={baseUrl} />
           </View>
         ))}
         <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
@@ -126,7 +129,7 @@ export function ConversationsTab(props: PrTabContext) {
               openChat(`Thread on ${thread.path}${thread.line ? `:${thread.line}` : ""}\n\n${thread.comments.map((cm) => `${cm.author}: ${cm.body}`).join("\n")}`)
             }
           >
-            <Text style={{ color: c.accent, fontSize: 11 }}>Ask agent</Text>
+            <Text style={{ color: c.accent, fontSize: 12 }}>Ask agent</Text>
           </Pressable>
           <ExplainAction repo={repo} number={number} target={`thread:${thread.id}`} theme={theme} />
         </View>
@@ -135,7 +138,7 @@ export function ConversationsTab(props: PrTabContext) {
           onChangeText={(value) => setReplies((prev) => ({ ...prev, [thread.id]: value }))}
           placeholder="Reply…"
           multiline
-          style={{ minHeight: 50, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 6, fontSize: 12 }}
+          style={{ minHeight: 50, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 6, fontSize: 13 }}
         />
         <View style={{ flexDirection: "row", gap: 8, justifyContent: "flex-end" }}>
           <Pressable
@@ -144,7 +147,7 @@ export function ConversationsTab(props: PrTabContext) {
             onPress={() => reply(thread, false)}
             style={{ paddingVertical: 5, paddingHorizontal: 10, backgroundColor: c.surface2, borderRadius: 6 }}
           >
-            <Text style={{ color: c.foreground, fontSize: 11 }}>Reply</Text>
+            <Text style={{ color: c.foreground, fontSize: 12 }}>Reply</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
@@ -154,7 +157,7 @@ export function ConversationsTab(props: PrTabContext) {
           >
             <View style={{ flexDirection: "row", gap: 4, alignItems: "center" }}>
               <Icon name="Check" size={11} color={c.accentForeground} />
-              <Text style={{ color: c.accentForeground, fontSize: 11 }}>Reply &amp; resolve</Text>
+              <Text style={{ color: c.accentForeground, fontSize: 12 }}>Reply &amp; resolve</Text>
             </View>
           </Pressable>
         </View>
