@@ -6,6 +6,7 @@ import { useInbox, useRepos } from "../data/hooks";
 import type { InboxSection, PrSummary } from "../../shared/types";
 import type { RecentPr } from "../../shared/ui-state";
 import { useRecentPrs } from "./ui-state";
+import { relativeAge } from "../ui/time";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 type ReviewDecision = PrSummary["reviewDecision"];
@@ -35,17 +36,6 @@ function prKey(repo: string, number: number): string {
   return `${repo.toLowerCase()}#${number}`;
 }
 
-function relativeAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days}d`;
-  return `${Math.round(days / 30)}mo`;
-}
 
 const REVIEW_LABEL: Record<ReviewDecision, string> = {
   APPROVED: "Approved",
@@ -144,8 +134,8 @@ export function Inbox({
     const out: Row[] = [];
     for (const section of SECTION_ORDER) {
       if (section === "recent") {
-        // Most recently opened in this app first (full rows when a search returned the PR),
-        // then whatever GitHub says you reviewed that you haven't opened here.
+        // PRs reviewed from this app, most recent first (full rows when a search returned the
+        // PR), then whatever else GitHub says you reviewed. Merely opening a PR doesn't count.
         const byKey = new Map(filtered.map((pr) => [prKey(pr.repo, pr.number), pr]));
         const seen = new Set<string>();
         const rows: Row[] = [];
@@ -153,6 +143,7 @@ export function Inbox({
           const key = prKey(recent.repo, recent.number);
           if (seen.has(key)) continue;
           const pr = byKey.get(key);
+          if (!recent.reviewedAt && !pr?.sections.includes("recent")) continue;
           if (pr) {
             seen.add(key);
             rows.push({ kind: "pr", key: `recent:${key}`, pr });

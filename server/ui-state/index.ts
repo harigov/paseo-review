@@ -5,7 +5,34 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { handle } from "../core/handle";
 import { dataDir } from "../core/paths";
 import { uiStateGetRpc, uiStateSetRpc } from "../../shared/rpc";
-import { DEFAULT_UI_STATE, UiStateSchema, type UiState } from "../../shared/ui-state";
+import { DEFAULT_UI_STATE, UiStateSchema, type RecentPr, type UiState } from "../../shared/ui-state";
+
+const RECENTS_CAP = 20;
+
+function recentKey(pr: { repo: string; number: number }): string {
+  return `${pr.repo.toLowerCase()}#${pr.number}`;
+}
+
+/**
+ * Merges the recents from an incoming (client) state with what is already on disk, keeping the
+ * newer `openedAt` / `reviewedAt` per PR. Two surfaces (two windows) each hold their own copy of
+ * the state, so a plain overwrite would drop whichever PR the other window opened last.
+ */
+export function mergeRecents(existing: RecentPr[], incoming: RecentPr[]): RecentPr[] {
+  const byKey = new Map<string, RecentPr>();
+  for (const pr of [...existing, ...incoming]) {
+    const key = recentKey(pr);
+    const prior = byKey.get(key);
+    if (!prior) {
+      byKey.set(key, pr);
+      continue;
+    }
+    const newest = pr.openedAt > prior.openedAt ? pr : prior;
+    const reviewedAt = [pr.reviewedAt, prior.reviewedAt].filter((v): v is string => !!v).sort().pop() ?? null;
+    byKey.set(key, { ...newest, reviewedAt });
+  }
+  return [...byKey.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt)).slice(0, RECENTS_CAP);
+}
 
 function file(): string {
   return path.join(dataDir(), "ui-state.json");
@@ -47,7 +74,8 @@ export function registerUiStateHandlers(server: PluginServerContext): void {
   handle(server, uiStateGetRpc, async () => ({ state: await loadUiState() }));
 
   handle(server, uiStateSetRpc, async (input) => {
-    await saveUiState(input.state);
+    const existing = await loadUiState();
+    await saveUiState({ ...input.state, recentPrs: mergeRecents(existing.recentPrs, input.state.recentPrs) });
     return { ok: true, message: null };
   });
 }

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { dataDir } from "../server/core/paths";
-import { loadUiState, saveUiState } from "../server/ui-state";
+import { loadUiState, mergeRecents, saveUiState } from "../server/ui-state";
 import { DEFAULT_UI_STATE, markReviewed, pushRecent, type UiState } from "../shared/ui-state";
 
 beforeAll(() => {
@@ -107,5 +107,22 @@ describe("markReviewed", () => {
     const next = markReviewed(state, "owner/repo", 999, "2026-01-01T00:00:02.000Z");
 
     expect(next).toBe(state);
+  });
+});
+
+describe("mergeRecents", () => {
+  const pr = (number: number, openedAt: string, reviewedAt: string | null = null) => ({ repo: "acme/widgets", number, title: `#${number}`, openedAt, reviewedAt });
+
+  it("keeps PRs that only one side knows about and the newer timestamps for shared ones", () => {
+    const existing = [pr(1, "2026-10-01T10:00:00Z"), pr(2, "2026-10-01T09:00:00Z", "2026-10-01T09:30:00Z")];
+    const incoming = [pr(3, "2026-10-01T11:00:00Z"), pr(2, "2026-10-01T08:00:00Z")];
+    const merged = mergeRecents(existing, incoming);
+    expect(merged.map((p) => p.number)).toEqual([3, 1, 2]);
+    expect(merged[2].reviewedAt).toBe("2026-10-01T09:30:00Z");
+  });
+
+  it("caps the merged list at 20", () => {
+    const many = Array.from({ length: 30 }, (_, i) => pr(i + 1, `2026-10-01T${String(i).padStart(2, "0")}:00:00Z`));
+    expect(mergeRecents(many.slice(0, 15), many.slice(10))).toHaveLength(20);
   });
 });

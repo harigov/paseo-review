@@ -5,6 +5,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Markdown } from "./Markdown";
 import { renderGithubIframe } from "./html-web";
 import { buildGithubCss } from "./github-css";
+import { isDarkSurface } from "../ui/color";
 
 // Module-level counter for `id` generation below: GithubHtmlView instances post/receive
 // window messages tagged with a per-instance id so one card's iframe can't move another
@@ -15,18 +16,6 @@ let instanceCounter = 0;
 const MIN_HEIGHT = 60;
 const INITIAL_HEIGHT = 160;
 
-/** Parses `#rgb`/`#rrggbb`; returns null (rather than guessing) when the format is unknown.
- * Mirrors the luminance test FileDiffView.tsx uses on `theme.colors.surface0` to decide
- * dark vs. light, duplicated here because that file is out of scope for this change. */
-function luminance(hex: string): number | null {
-  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
-  if (!match) return null;
-  const full = match[1]!.length === 3 ? match[1]!.split("").map((ch) => ch + ch).join("") : match[1]!;
-  const r = Number.parseInt(full.slice(0, 2), 16);
-  const g = Number.parseInt(full.slice(2, 4), 16);
-  const b = Number.parseInt(full.slice(4, 6), 16);
-  return r * 0.2126 + g * 0.7152 + b * 0.0722;
-}
 
 /** Only `https:` URLs may be opened; root-relative hrefs (`/owner/repo/...`) are resolved
  * against github.com first. Everything else (http:, javascript:, mailto:, bare fragments, …)
@@ -118,10 +107,7 @@ export function GithubHtmlView({
     return <Markdown body={markdown} theme={theme} baseUrl={baseUrl} />;
   }
 
-  const surfaceLuminance = luminance(c.surface0);
-  // Fail open to "light" when the theme doesn't hand back a parseable hex color, same as
-  // FileDiffView does for its own surface0-driven syntax palette choice.
-  const dark = surfaceLuminance !== null && surfaceLuminance < 128;
+  const dark = isDarkSurface(c.surface0);
   const css = buildGithubCss(c);
   const srcDoc = buildSrcDoc(html, css, dark, id);
 

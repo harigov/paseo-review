@@ -5,23 +5,12 @@ import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import type { PrTabContext } from "../pr/tab-props";
 import type { PrCheck, ReviewDecision, ReviewState, ValidatorResult } from "../../shared/types";
 import { Chip, Dot } from "../ui/chips";
+import { relativeAge } from "../ui/time";
 import { validatorScoreboard } from "./ValidatorResultsList";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 type ChecksState = PrCheck["state"];
 
-/** Local to this panel — deliberately not imported from Inbox.tsx, which has its own copy. */
-function relativeAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days}d`;
-  return `${Math.round(days / 30)}mo`;
-}
 
 const REVIEW_DECISION_CHIP: Partial<Record<ReviewDecision, { label: string; color: (c: ThemeColors) => string }>> = {
   APPROVED: { label: "Approved", color: (c) => c.statusSuccess },

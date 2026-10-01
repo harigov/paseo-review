@@ -5,7 +5,7 @@ import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
-import { ChatStartResultSchema, chatStartRpc, prAnalyzeRpc } from "../../shared/rpc";
+import { prAnalyzeRpc } from "../../shared/rpc";
 import { prReviewSettings } from "../../shared/settings";
 import type { DiffLayout, ReadingOrder } from "../../shared/types";
 import type { PrTabContext } from "../pr/tab-props";
@@ -18,6 +18,7 @@ import { ConversationsTab } from "../review/ConversationsTab";
 import { ReviewSubmitButton } from "../review/ReviewSubmitButton";
 import { recordRecentPr, rememberPrTab, useLastLocation } from "./ui-state";
 import { StatusPanel } from "../review/StatusPanel";
+import { ChatPanel } from "../review/ChatPanel";
 
 const READING_ORDERS: { id: ReadingOrder; label: string }[] = [
   { id: "foundations", label: "Foundations first" },
@@ -35,9 +36,7 @@ export function PrScreen(
   const detailQuery = usePr(repo, number);
   const analysisQuery = useAnalysis(repo, number);
   const prAnalyze = useRpc(prAnalyzeRpc);
-  const chatStart = useRpc(chatStartRpc);
   const analyzeRunner = useJobRunner();
-  const chatRunner = useJobRunner();
   const triedHeadRef = useRef<string | null>(null);
 
   // Reopen the tab the user was on when this PR was last shown (persisted across remounts).
@@ -58,6 +57,12 @@ export function PrScreen(
   const [initializedReadingOrder, setInitializedReadingOrder] = useState(false);
   const [statusOpen, setStatusOpen] = useState(true);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
+  // Right column content on wide layouts; the chat panel stays mounted once opened so its
+  // agent subscription and message list survive switching back to Status.
+  const [panelTab, setPanelTab] = useState<"status" | "chat">("status");
+  const [chatMounted, setChatMounted] = useState(false);
+  const [chatModalOpen, setChatModalOpen] = useState(false);
+  const [chatSeed, setChatSeed] = useState<{ seed: string; key: string } | null>(null);
 
   // Seed per-session view preferences from settings once they load; later toggles stay local.
   useEffect(() => {
@@ -118,30 +123,21 @@ export function PrScreen(
       });
   }, [analyzeRunner, prAnalyze, repo, number, detailQuery, analysisQuery, toast]);
 
+  // Chat happens in the side panel (or a modal on compact layouts), not in the agent view; the
+  // panel itself starts or reuses the PR's agent. A seed (e.g. "Ask about this module") is sent
+  // once the agent is ready.
   const openChat = useCallback(
-    async (seed?: string) => {
-      toast.show("Starting the PR chat… this can take about 10s.", { variant: "info" });
-      try {
-        const job = await chatRunner.run(() => chatStart({ repo, number, seed }));
-        if (job.status === "error") {
-          toast.error(job.error ?? "Could not start chat.");
-          return;
-        }
-        const parsed = ChatStartResultSchema.safeParse(job.result);
-        if (!parsed.success) {
-          toast.error("Chat did not return a valid result.");
-          return;
-        }
-        if (!navigation?.openAgent) {
-          toast.error("Chat needs a newer Paseo host.");
-          return;
-        }
-        navigation.openAgent({ agentId: parsed.data.agentId });
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not start chat.");
+    (seed?: string) => {
+      if (seed) setChatSeed({ seed, key: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
+      setChatMounted(true);
+      if (layout.compact) {
+        setChatModalOpen(true);
+      } else {
+        setStatusOpen(true);
+        setPanelTab("chat");
       }
     },
-    [chatRunner, chatStart, repo, number, navigation, toast],
+    [layout.compact],
   );
 
   const ctx: PrTabContext = useMemo(
@@ -323,7 +319,7 @@ export function PrScreen(
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            onPress={() => void openChat()}
+            onPress={() => openChat()}
             style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border }}
           >
             <Text style={{ fontSize: 11, color: c.foreground }}>Chat</Text>
@@ -355,17 +351,72 @@ export function PrScreen(
         {TabRail}
         <View style={{ flex: 1 }}>{renderTabContent()}</View>
         {!layout.compact && statusOpen && (
-          <View style={{ width: 280, borderLeftWidth: 1, borderColor: c.border }}>
-            <StatusPanel {...ctx} />
+          <View style={{ width: panelTab === "chat" ? 340 : 280, borderLeftWidth: 1, borderColor: c.border }}>
+            <View style={{ flexDirection: "row", borderBottomWidth: 1, borderColor: c.border }}>
+              {(["status", "chat"] as const).map((tab) => (
+                <Pressable
+                  key={tab}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    if (tab === "chat") setChatMounted(true);
+                    setPanelTab(tab);
+                  }}
+                  style={{
+                    flex: 1,
+                    alignItems: "center",
+                    paddingVertical: 8,
+                    borderBottomWidth: 2,
+                    borderBottomColor: panelTab === tab ? c.accent : "transparent",
+                  }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "600", color: panelTab === tab ? c.foreground : c.foregroundMuted }}>
+                    {tab === "status" ? "Status" : "Chat"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <View style={{ flex: 1, display: panelTab === "status" ? "flex" : "none" }}>
+              <StatusPanel {...ctx} />
+            </View>
+            {chatMounted && (
+              <View style={{ flex: 1, display: panelTab === "chat" ? "flex" : "none" }}>
+                <ChatPanel
+                  repo={repo}
+                  number={number}
+                  prUrl={summary.url}
+                  theme={theme}
+                  navigation={navigation}
+                  seed={chatSeed?.seed}
+                  seedKey={chatSeed?.key}
+                />
+              </View>
+            )}
           </View>
         )}
       </View>
       {layout.compact && (
-        <Modal title="Status" open={statusModalOpen} onOpenChange={setStatusModalOpen}>
-          <Modal.Content>
-            <StatusPanel {...ctx} />
-          </Modal.Content>
-        </Modal>
+        <>
+          <Modal title="Status" open={statusModalOpen} onOpenChange={setStatusModalOpen}>
+            <Modal.Content>
+              <StatusPanel {...ctx} />
+            </Modal.Content>
+          </Modal>
+          <Modal title="Chat" open={chatModalOpen} onOpenChange={setChatModalOpen}>
+            <Modal.Content scrollable={false} style={{ flex: 1 }}>
+              {chatMounted && (
+                <ChatPanel
+                  repo={repo}
+                  number={number}
+                  prUrl={summary.url}
+                  theme={theme}
+                  navigation={navigation}
+                  seed={chatSeed?.seed}
+                  seedKey={chatSeed?.key}
+                />
+              )}
+            </Modal.Content>
+          </Modal>
+        </>
       )}
     </View>
   );

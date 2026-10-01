@@ -14,9 +14,11 @@ const EVENTS = [
 ];
 
 export function ReviewSubmitButton(props: PrTabContext) {
-  const { repo, number, theme, refresh, reanalyze, analysis } = props;
+  const { repo, number, theme, refresh, reanalyze, analysis, detail } = props;
   const c = theme.colors;
-  const headSha = analysis?.headSha ?? "";
+  // Prefer the live PR head: the diffs (and so the drafts' line numbers) come from it, and the
+  // analysis can lag behind for a while after a push.
+  const headSha = detail?.summary.headSha ?? analysis?.headSha ?? "";
   const drafts = useDrafts(repo, number, headSha);
   const rpc = useRpc(reviewSubmitRpc);
   const toast = useToast();
@@ -68,7 +70,12 @@ export function ReviewSubmitButton(props: PrTabContext) {
   }
 
   function saveEditDraft(index: number) {
-    updateDraft(repo, number, headSha, index, editBody.trim());
+    const body = editBody.trim();
+    if (!body) {
+      toast.error("A comment can't be empty.");
+      return;
+    }
+    updateDraft(repo, number, headSha, index, body);
     setEditingIndex(null);
     setEditBody("");
   }

@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { highlightCode, resolveSyntaxColors, type HighlightToken } from "@getpaseo/highlight";
 import { commentCreateRpc, commentDeleteRpc, commentUpdateRpc, fileDiffRpc, threadReplyRpc } from "../../shared/rpc";
 import type { DiffLayout, DiffLine, FileDiff, Hunk, Thread, ValidatorFinding } from "../../shared/types";
+import { isDarkSurface } from "../ui/color";
 import { addDraft, removeDraft, updateDraft, useDrafts, useFileDrafts, type DraftComment } from "../review/drafts";
 import { expandTabs, markWhitespace, pairHunkLines } from "./pairing";
 
@@ -46,16 +47,6 @@ const codeText = { ...code, ...(Platform.OS === "web" ? ({ whiteSpace: "pre" } a
 
 const DELETE_CONFIRM_MS = 4_000;
 
-/** Parses `#rgb`/`#rrggbb`; returns null (rather than guessing) when the format is unknown. */
-function luminance(hex: string): number | null {
-  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
-  if (!match) return null;
-  const full = match[1].length === 3 ? match[1].split("").map((ch) => ch + ch).join("") : match[1];
-  const r = Number.parseInt(full.slice(0, 2), 16);
-  const g = Number.parseInt(full.slice(2, 4), 16);
-  const b = Number.parseInt(full.slice(4, 6), 16);
-  return r * 0.2126 + g * 0.7152 + b * 0.0722;
-}
 
 /**
  * Highlights one hunk's old- and new-side text in as few highlightCode calls as possible.
@@ -193,8 +184,7 @@ export function FileDiffView({
   // Fail open to "light" when the theme doesn't hand back a parseable hex color, rather than
   // silently forcing the dark palette (PluginTheme.colors is typed as plain `string`, with no
   // guaranteed format).
-  const surfaceLuminance = luminance(c.surface0);
-  const dark = surfaceLuminance !== null && surfaceLuminance < 128;
+  const dark = isDarkSurface(c.surface0);
   const palette = useMemo(() => resolveSyntaxColors("github", dark ? "dark" : "light"), [dark]);
 
   // Only highlight hunks that are actually visible: lines inside a collapsed moved/whitespace
@@ -341,7 +331,8 @@ export function FileDiffView({
     }
     setComposerBusy(true);
     try {
-      await updateCommentRpc({ repo, number, commentId: composer.commentId, body });
+      const result = await updateCommentRpc({ repo, number, commentId: composer.commentId, body });
+      if (!result.ok) throw new Error(result.message ?? "Failed to update the comment");
       toast.show("Comment updated");
       onCommented?.();
       closeComposer();
@@ -359,7 +350,8 @@ export function FileDiffView({
 
   async function deleteComment(commentId: string) {
     try {
-      await deleteCommentRpc({ repo, number, commentId });
+      const result = await deleteCommentRpc({ repo, number, commentId });
+      if (!result.ok) throw new Error(result.message ?? "Failed to delete the comment");
       toast.show("Comment deleted");
       onCommented?.();
     } catch (err) {
@@ -393,7 +385,8 @@ export function FileDiffView({
     if (!body) return;
     setSendingReply(thread.id);
     try {
-      await replyRpc({ repo, number, threadId: thread.id, body, resolve });
+      const result = await replyRpc({ repo, number, threadId: thread.id, body, resolve });
+      if (!result.ok) throw new Error(result.message ?? "Failed to reply");
       toast.show(resolve ? "Replied and resolved" : "Replied");
       setReplyBodies((prev) => ({ ...prev, [thread.id]: "" }));
       setReplyOpenThreads((prev) => {

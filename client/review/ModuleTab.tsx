@@ -37,7 +37,9 @@ export function ModuleTab(props: ModuleTabProps) {
   const toast = useToast();
   const viewedRpc = useRpc(fileViewedRpc);
   const moveRpc = useRpc(fileMoveRpc);
-  const headSha = analysis?.headSha ?? detail?.summary.headSha ?? "";
+  // Prefer the live PR head: file diffs are computed against it, so draft/comment line numbers
+  // and the "Comment now" commit must match it even while a re-analysis is still running.
+  const headSha = detail?.summary.headSha ?? analysis?.headSha ?? "";
 
   const moduleInfo = analysis?.modules.find((m) => m.id === moduleId) ?? null;
   const isNoiseModule = (moduleInfo?.title ?? "").toLowerCase() === "noise" || moduleId === "noise";

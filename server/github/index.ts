@@ -397,7 +397,8 @@ async function fillInboxEnrichment(prs: PrSummary[], repos: Repo[]): Promise<voi
       }
     }),
   );
-  const eligible = prs.filter((pr) => decisionsEnabled.get(pr.repo.toLowerCase()));
+  // Merged/closed PRs (from the "recent" search) need no attention score.
+  const eligible = prs.filter((pr) => pr.state === "OPEN" && decisionsEnabled.get(pr.repo.toLowerCase()));
   if (eligible.length) await fillAttention(eligible);
 }
 
