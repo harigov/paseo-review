@@ -1,0 +1,35 @@
+{
+  "name": "paseo-pr-review",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check:bundle": "node scripts/check-bundle.mjs"
+  },
+  "dependencies": {
+    "@getpaseo/highlight": "0.10.2",
+    "marked": "^18.0.14",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.10.2",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/node": "^20.17.0",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "zod": "^4.4.3"
+  }
+}
