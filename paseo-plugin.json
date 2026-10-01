@@ -1,0 +1,15 @@
+{
+  "id": "pr-review",
+  "description": "Review large GitHub pull requests in Paseo: modules, reading order, viewed sync, System One validators, and agent chat.",
+  "requirements": {
+    "paseo": ">=0.10.2"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--ignore-scripts"
+    ]
+  ]
+}

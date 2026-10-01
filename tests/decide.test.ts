@@ -1,0 +1,333 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cacheKey,
+  normalizeAnswer,
+  probsToOrderedArray,
+  resolveConfig,
+  scoreTo1to5,
+  unwrapResponse,
+} from "../server/decide/client";
+import { createDecisionService } from "../server/decide";
+import { setSettingsHandle } from "../server/core/settings";
+import { PrReviewSettingsSchema } from "../shared/settings";
+
+function useProvider(provider: "openrouter" | "cloudflare" | "jev" | "custom", extra: Record<string, unknown> = {}) {
+  const values = PrReviewSettingsSchema.parse({ decision: { provider, ...extra } });
+  setSettingsHandle({
+    read: async () => ({ status: "ready", revision: "1", values }),
+    subscribe: () => () => {},
+  } as never);
+}
+
+beforeAll(() => {
+  process.env.PASEO_HOME = mkdtempSync(path.join(tmpdir(), "pr-review-decide-"));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.CLOUDFLARE_ACCOUNT_ID;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  delete process.env.TYPESAFE_API_KEY;
+  delete process.env.SYSTEMONE_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  useProvider("openrouter");
+});
+
+const FIVE_LEVELS = ["L0: trivial", "L1: low", "L2: moderate", "L3: high", "L4: critical"];
+
+describe("normalizeAnswer", () => {
+  it("normalizes a noul answer and clamps out-of-range values", () => {
+    expect(normalizeAnswer({ noul: 0.73 }, "noul")).toEqual({ type: "noul", noul: 0.73 });
+    expect(normalizeAnswer({ noul: 4 }, "noul")).toEqual({ type: "noul", noul: 1 });
+  });
+
+  it("returns null (not a guessed default) for a malformed/missing noul answer, so it is never cached as a false confident 0", () => {
+    expect(normalizeAnswer(undefined, "noul")).toBeNull();
+    expect(normalizeAnswer({}, "noul")).toBeNull();
+    expect(normalizeAnswer({ foo: "bar" }, "noul")).toBeNull();
+  });
+
+  it("normalizes a choice answer", () => {
+    const answer = normalizeAnswer({ choice: "violation", probabilities: { violation: 0.9, compliant: 0.1 }, confidence: 0.9 }, "choice");
+    expect(answer).toEqual({
+      type: "choice",
+      choice: "violation",
+      probabilities: { violation: 0.9, compliant: 0.1 },
+      confidence: 0.9,
+    });
+  });
+
+  it("returns null for a malformed/missing choice answer (missing choice or probabilities)", () => {
+    expect(normalizeAnswer(undefined, "choice")).toBeNull();
+    expect(normalizeAnswer({ choice: "" }, "choice")).toBeNull();
+    expect(normalizeAnswer({ choice: "violation" }, "choice")).toBeNull();
+  });
+
+  it("returns null for a malformed/missing score answer", () => {
+    expect(normalizeAnswer(undefined, "score", FIVE_LEVELS)).toBeNull();
+    expect(normalizeAnswer({ probabilities: {} }, "score", FIVE_LEVELS)).toBeNull();
+  });
+
+  it("maps a 0-indexed numeric-keyed score answer onto 1..N criteria positions (documented fallback assumption)", () => {
+    const answer = normalizeAnswer(
+      { score: 2, probabilities: { "0": 0.1, "1": 0.2, "2": 0.4, "3": 0.2, "4": 0.1 } },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      // Re-keyed to canonical "1".."5"; weighted average = 1*.1+2*.2+3*.4+4*.2+5*.1 = 3.0
+      expect(answer.probabilities).toEqual({ "1": 0.1, "2": 0.2, "3": 0.4, "4": 0.2, "5": 0.1 });
+      expect(answer.score).toBeCloseTo(3.0);
+    }
+  });
+
+  it("maps a 1-indexed numeric-keyed score answer onto 1..N criteria positions as-is", () => {
+    const answer = normalizeAnswer(
+      { score: 4, probabilities: { "1": 0.1, "2": 0.1, "3": 0.1, "4": 0.6, "5": 0.1 } },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      expect(answer.probabilities).toEqual({ "1": 0.1, "2": 0.1, "3": 0.1, "4": 0.6, "5": 0.1 });
+    }
+  });
+
+  it("prefers a legend (key -> level text) over numeric-key guessing when both are present", () => {
+    // Legend says key "9" is actually our 3rd level ("L2: moderate"), contradicting what a
+    // naive numeric sort would assume -- the legend must win.
+    const answer = normalizeAnswer(
+      {
+        score: 9,
+        probabilities: { "9": 1 },
+        legend: { "9": "L2: moderate" },
+      },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      expect(answer.probabilities).toEqual({ "3": 1 });
+      expect(answer.score).toBe(3);
+    }
+  });
+
+  it("returns null (rather than trusting object insertion order) for non-numeric keys with no usable legend", () => {
+    expect(
+      normalizeAnswer({ score: 1, probabilities: { feature: 0.6, fix: 0.4 } }, "score", FIVE_LEVELS),
+    ).toBeNull();
+  });
+});
+
+describe("scoreTo1to5", () => {
+  it("clamps an already-normalized score to the 1..5 range", () => {
+    expect(scoreTo1to5({ score: -3, probabilities: {} })).toBe(1);
+    expect(scoreTo1to5({ score: 99, probabilities: {} })).toBe(5);
+    expect(scoreTo1to5({ score: 3.4, probabilities: {} })).toBeCloseTo(3.4);
+  });
+});
+
+describe("probsToOrderedArray", () => {
+  it("orders numeric-keyed probabilities ascending (the shape normalizeAnswer always produces for score answers)", () => {
+    expect(probsToOrderedArray({ "2": 0.1, "0": 0.5, "1": 0.4 })).toEqual([0.5, 0.4, 0.1]);
+  });
+
+  it("falls back to plain insertion order for non-numeric keys (legacy/defensive path only)", () => {
+    expect(probsToOrderedArray({ feature: 0.6, fix: 0.4 })).toEqual([0.6, 0.4]);
+  });
+});
+
+describe("unwrapResponse", () => {
+  it("unwraps the Cloudflare envelope", () => {
+    const body = { result: { model: "clef-flash", answers: { a: { type: "noul", noul: 0.5 } } }, success: true, errors: [] };
+    expect(unwrapResponse("cloudflare", body)).toEqual(body.result);
+  });
+
+  it("throws when Cloudflare reports failure", () => {
+    expect(() => unwrapResponse("cloudflare", { success: false, errors: [{ message: "boom" }] })).toThrow("boom");
+  });
+
+  it("passes through a bare jev response", () => {
+    const body = { model: "jev-latest", answers: { a: { type: "noul", noul: 0.2 } } };
+    expect(unwrapResponse("jev", body)).toEqual(body);
+  });
+
+  it("unwraps an optional {result} envelope for custom endpoints", () => {
+    const body = { result: { answers: { a: { type: "noul", noul: 0.2 } } } };
+    expect(unwrapResponse("custom", body)).toEqual(body.result);
+  });
+});
+
+describe("cacheKey", () => {
+  it("is stable for identical inputs and differs when state or question changes", () => {
+    const question = { type: "noul" as const, instructions: "is this noise?" };
+    const k1 = cacheKey("clef-flash", { path: "a.ts" }, question);
+    const k2 = cacheKey("clef-flash", { path: "a.ts" }, question);
+    const k3 = cacheKey("clef-flash", { path: "b.ts" }, question);
+    expect(k1).toBe(k2);
+    expect(k1).not.toBe(k3);
+  });
+});
+
+describe("resolveConfig", () => {
+  it("defaults to OpenRouter's System One endpoint with Jev", async () => {
+    useProvider("openrouter");
+    expect((await resolveConfig()).reason).toMatch(/OpenRouter/);
+    process.env.OPENROUTER_API_KEY = "or-key";
+    const { config, reason } = await resolveConfig();
+    expect(reason).toBeNull();
+    expect(config?.provider).toBe("openrouter");
+    expect(config?.url).toBe("https://openrouter.ai/api/v1/systemone");
+    expect(config?.model).toBe("typesafe/jev-1.13");
+    expect(config?.apiKey).toBe("or-key");
+  });
+
+  it("lets the endpoint URL override any provider (self-hosted)", async () => {
+    useProvider("openrouter", { endpointUrl: "http://localhost:9000/v1/systemone", apiKey: "k" });
+    const { config } = await resolveConfig();
+    expect(config?.url).toBe("http://localhost:9000/v1/systemone");
+  });
+
+  it("reports not configured for cloudflare with no credentials", async () => {
+    useProvider("cloudflare");
+    const { config, reason } = await resolveConfig();
+    expect(config).toBeNull();
+    expect(reason).toMatch(/Cloudflare/);
+  });
+
+  it("resolves a cloudflare config from env vars", async () => {
+    useProvider("cloudflare");
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acct123";
+    process.env.CLOUDFLARE_API_TOKEN = "token123";
+    const { config, reason } = await resolveConfig();
+    expect(reason).toBeNull();
+    expect(config?.url).toBe("https://api.cloudflare.com/client/v4/accounts/acct123/ai/run/@cf/cloudflare/clef-flash");
+    expect(config?.apiKey).toBe("token123");
+  });
+});
+
+describe("createDecisionService", () => {
+  beforeEach(() => {
+    useProvider("cloudflare");
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acct123";
+    process.env.CLOUDFLARE_API_TOKEN = "token123";
+  });
+
+  it("status() reflects configuration state", async () => {
+    const service = createDecisionService();
+    const status = await service.status();
+    expect(status.configured).toBe(true);
+    expect(status.provider).toBe("cloudflare");
+  });
+
+  it("sends a request to the resolved endpoint and normalizes a Cloudflare-wrapped response", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toContain("ai/run/@cf/cloudflare/clef-flash");
+      const body = JSON.parse(init.body as string);
+      expect(body.model).toBe("clef-flash");
+      expect(body.questions.noise.type).toBe("noul");
+      return new Response(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result: {
+            model: "clef-flash",
+            answers: { noise: { type: "noul", noul: 0.12 } },
+            usage: { input_tokens: 42, output_tokens: 0 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = createDecisionService();
+    const [res] = await service.evaluate([
+      { state: { path: "a.ts" }, questions: { noise: { type: "noul", instructions: "mechanical?" } } },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect("error" in res).toBe(false);
+    if (!("error" in res)) {
+      expect(res.answers.noise).toEqual({ type: "noul", noul: 0.12 });
+      expect(res.inputTokens).toBe(42);
+    }
+  });
+
+  it("returns a per-request error instead of throwing when the call fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [{ message: "nope" }] }), { status: 400 })),
+    );
+    const service = createDecisionService();
+    const [res] = await service.evaluate([
+      { state: { path: "failing-case.ts" }, questions: { noise: { type: "noul", instructions: "mechanical?" } } },
+    ]);
+    expect("error" in res).toBe(true);
+  });
+
+  it("omits a malformed/unusable answer instead of caching a guessed default (D5)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ success: true, errors: [], result: { answers: { noise: {} }, usage: { input_tokens: 1 } } }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const service = createDecisionService();
+    const [res] = await service.evaluate([
+      { state: { path: "d5-malformed-test.ts" }, questions: { noise: { type: "noul", instructions: "mechanical?" } } },
+    ]);
+    expect("error" in res).toBe(false);
+    if (!("error" in res)) expect(res.answers.noise).toBeUndefined();
+  });
+
+  it("shares one concurrency limiter across separate evaluate() calls, not one per call (D7)", async () => {
+    useProvider("cloudflare", { concurrency: 1 });
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acct123";
+    process.env.CLOUDFLARE_API_TOKEN = "token123";
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchMock = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight--;
+      return new Response(
+        JSON.stringify({ success: true, errors: [], result: { answers: { noise: { type: "noul", noul: 0.1 } }, usage: {} } }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = createDecisionService();
+    await Promise.all([
+      service.evaluate([{ state: { path: "a.ts" }, questions: { noise: { type: "noul", instructions: "x" } } }]),
+      service.evaluate([{ state: { path: "b.ts" }, questions: { noise: { type: "noul", instructions: "x" } } }]),
+    ]);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("classifyFiles degrades to nulls when not configured", async () => {
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    const service = createDecisionService();
+    const [result] = await service.classifyFiles([
+      { path: "a.ts", language: "ts", diff: "+x", prTitle: "t", modules: { core: "Core logic" } },
+    ]);
+    expect(result).toEqual({
+      path: "a.ts",
+      moduleId: null,
+      moduleConfidence: null,
+      noiseProbability: null,
+      risk: null,
+      complexity: null,
+    });
+  });
+});

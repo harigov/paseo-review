@@ -1,0 +1,8 @@
+{
+  // Editor default. `npm run typecheck` checks the server and client programs separately
+  // so each sees only its own runtime's globals.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "types": ["node", "react"] },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
