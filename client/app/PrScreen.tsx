@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
-import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
 import { ChatStartResultSchema, chatStartRpc, prAnalyzeRpc } from "../../shared/rpc";
@@ -16,6 +16,7 @@ import { ModuleTab } from "../review/ModuleTab";
 import { ValidatorsTab } from "../review/ValidatorsTab";
 import { ConversationsTab } from "../review/ConversationsTab";
 import { ReviewSubmitButton } from "../review/ReviewSubmitButton";
+import { StatusPanel } from "../review/StatusPanel";
 
 const READING_ORDERS: { id: ReadingOrder; label: string }[] = [
   { id: "foundations", label: "Foundations first" },
@@ -43,6 +44,8 @@ export function PrScreen(
   const [diffLayout, setDiffLayout] = useState<DiffLayout>("inline");
   const [sinceLastReview, setSinceLastReview] = useState(false);
   const [initializedReadingOrder, setInitializedReadingOrder] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(true);
+  const [statusModalOpen, setStatusModalOpen] = useState(false);
 
   // Seed per-session view preferences from settings once they load; later toggles stay local.
   useEffect(() => {
@@ -245,6 +248,11 @@ export function PrScreen(
           <Text numberOfLines={1} style={{ flex: 1, color: c.foreground, fontSize: 16, fontWeight: "600" }}>
             {summary.title}
           </Text>
+          {!layout.compact && (
+            <Pressable accessibilityRole="button" onPress={() => setStatusOpen((v) => !v)} style={{ padding: 4 }}>
+              <Icon name={statusOpen ? "PanelRightClose" : "PanelRightOpen"} size={18} color={c.foreground} />
+            </Pressable>
+          )}
         </View>
         <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
           {repo}#{number} · {summary.state}
@@ -261,6 +269,24 @@ export function PrScreen(
           >
             <Text style={{ fontSize: 11, color: c.foreground }}>{READING_ORDERS.find((o) => o.id === readingOrder)?.label}</Text>
           </Pressable>
+          {!layout.compact && (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setDiffLayout((cur) => (cur === "inline" ? "split" : "inline"))}
+              style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border }}
+            >
+              <Text style={{ fontSize: 11, color: c.foreground }}>{diffLayout === "inline" ? "Inline diff" : "Split diff"}</Text>
+            </Pressable>
+          )}
+          {layout.compact && (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setStatusModalOpen(true)}
+              style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border }}
+            >
+              <Text style={{ fontSize: 11, color: c.foreground }}>Status</Text>
+            </Pressable>
+          )}
           <Pressable
             accessibilityRole="button"
             disabled={!analysis?.sinceAnchorSha}
@@ -310,7 +336,19 @@ export function PrScreen(
       <View style={{ flex: 1, flexDirection: layout.compact ? "column" : "row" }}>
         {TabRail}
         <View style={{ flex: 1 }}>{renderTabContent()}</View>
+        {!layout.compact && statusOpen && (
+          <View style={{ width: 280, borderLeftWidth: 1, borderColor: c.border }}>
+            <StatusPanel {...ctx} />
+          </View>
+        )}
       </View>
+      {layout.compact && (
+        <Modal title="Status" open={statusModalOpen} onOpenChange={setStatusModalOpen}>
+          <Modal.Content>
+            <StatusPanel {...ctx} />
+          </Modal.Content>
+        </Modal>
+      )}
     </View>
   );
 }

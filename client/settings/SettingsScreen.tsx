@@ -27,6 +27,11 @@ const READING_ORDER_OPTIONS = [
   { label: "Chronological", value: "chrono" as const },
 ];
 
+const DIFF_LAYOUT_OPTIONS = [
+  { label: "Inline", value: "inline" as const },
+  { label: "Split (side by side)", value: "split" as const },
+];
+
 const AGENT_TASKS: { key: keyof PrReviewSettings["agents"]; label: string }[] = [
   { key: "summary", label: "Summary" },
   { key: "chat", label: "Chat" },
@@ -368,12 +373,18 @@ export function SettingsScreen(_props: PluginSurfaceProps): ReactNode {
           />
         </SettingsGroup>
 
-        <SettingsGroup title="Reading order">
+        <SettingsGroup title="Reading and diff">
           <SettingsSelect
             label="Default reading order"
             value={values.readingOrder}
             options={READING_ORDER_OPTIONS}
             onValueChange={(readingOrder) => committer.commit("readingOrder", (v) => ({ ...v, readingOrder }))}
+          />
+          <SettingsSelect
+            label="Default diff layout"
+            value={values.diffLayout}
+            options={DIFF_LAYOUT_OPTIONS}
+            onValueChange={(diffLayout) => committer.commit("diffLayout", (v) => ({ ...v, diffLayout }))}
           />
         </SettingsGroup>
 
