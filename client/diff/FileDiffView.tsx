@@ -10,6 +10,7 @@ import type { DiffLayout, DiffLine, FileDiff, Hunk, Thread, ValidatorFinding } f
 import { isDarkSurface } from "../ui/color";
 import { addDraft, removeDraft, updateDraft, useDrafts, useFileDrafts, type DraftComment } from "../review/drafts";
 import { expandTabs, markWhitespace, pairHunkLines } from "./pairing";
+import { Markdown } from "../render/Markdown";
 
 export interface FileDiffFinding extends ValidatorFinding {
   validatorId: string;
@@ -92,8 +93,9 @@ function rowHeight(row: Row): number {
     case "pair":
       return LINE_HEIGHT;
     case "thread":
-      // Each comment can now show Edit/Delete plus a reply box, so pad the per-comment estimate.
-      return 40 + row.thread.comments.length * 84;
+      // Comments render as markdown (variable height) with Edit/Delete and a reply box; this is
+      // only a rough estimate for the scroll window, not a layout contract.
+      return 40 + row.thread.comments.length * 110;
     case "finding":
       return 26;
     case "draft":
@@ -564,9 +566,7 @@ export function FileDiffView({
           return (
             <View key={comment.id} style={{ gap: 2 }}>
               <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>{comment.author}</Text>
-              <Text style={{ color: c.foreground, fontSize: 14, lineHeight: 20 }} numberOfLines={6}>
-                {comment.body}
-              </Text>
+              <Markdown body={comment.body} theme={theme} baseUrl={comment.url} />
               {mine ? (
                 <View style={{ flexDirection: "row", gap: 14 }}>
                   <Pressable

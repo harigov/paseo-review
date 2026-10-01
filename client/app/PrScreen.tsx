@@ -19,6 +19,7 @@ import { ReviewSubmitButton } from "../review/ReviewSubmitButton";
 import { recordRecentPr, rememberPrTab, useLastLocation } from "./ui-state";
 import { StatusPanel } from "../review/StatusPanel";
 import { ChatPanel } from "../review/ChatPanel";
+import { ErrorBoundary } from "../ui/ErrorBoundary";
 
 const READING_ORDERS: { id: ReadingOrder; label: string }[] = [
   { id: "foundations", label: "Foundations first" },
@@ -380,15 +381,17 @@ export function PrScreen(
             </View>
             {chatMounted && (
               <View style={{ flex: 1, display: panelTab === "chat" ? "flex" : "none" }}>
-                <ChatPanel
-                  repo={repo}
-                  number={number}
-                  prUrl={summary.url}
-                  theme={theme}
-                  navigation={navigation}
-                  seed={chatSeed?.seed}
-                  seedKey={chatSeed?.key}
-                />
+                <ErrorBoundary fallbackTitle="Chat is unavailable on this host." color={c.foregroundMuted}>
+                  <ChatPanel
+                    repo={repo}
+                    number={number}
+                    prUrl={summary.url}
+                    theme={theme}
+                    navigation={navigation}
+                    seed={chatSeed?.seed}
+                    seedKey={chatSeed?.key}
+                  />
+                </ErrorBoundary>
               </View>
             )}
           </View>
@@ -404,15 +407,17 @@ export function PrScreen(
           <Modal title="Chat" open={chatModalOpen} onOpenChange={setChatModalOpen}>
             <Modal.Content scrollable={false} style={{ flex: 1 }}>
               {chatMounted && (
-                <ChatPanel
-                  repo={repo}
-                  number={number}
-                  prUrl={summary.url}
-                  theme={theme}
-                  navigation={navigation}
-                  seed={chatSeed?.seed}
-                  seedKey={chatSeed?.key}
-                />
+                <ErrorBoundary fallbackTitle="Chat is unavailable on this host." color={c.foregroundMuted}>
+                  <ChatPanel
+                    repo={repo}
+                    number={number}
+                    prUrl={summary.url}
+                    theme={theme}
+                    navigation={navigation}
+                    seed={chatSeed?.seed}
+                    seedKey={chatSeed?.key}
+                  />
+                </ErrorBoundary>
               )}
             </Modal.Content>
           </Modal>
