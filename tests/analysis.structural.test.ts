@@ -265,6 +265,32 @@ describe("JSON / YAML structural diff", () => {
     expect(result.entries[0]!.path).toBe("k0");
     expect(result.entries[1999]!.path).toBe("k1999");
   });
+
+  it("reports an error without parsing for a JSON file over 2 MB", () => {
+    const oldText = JSON.stringify({ filler: "x".repeat(2.5 * 1024 * 1024), version: "1.0.0" });
+    const result = computeStructuralDiff("data.json", "json", oldText, oldText);
+    expect(result.entries).toEqual([]);
+    expect(result.truncated).toBe(false);
+    expect(result.error).toBe("File too large for a structural view (over 2 MB).");
+  });
+
+  it("uses JSON.parse directly (null lines) for a .json file over 300 KB", () => {
+    const filler = "x".repeat(400 * 1024);
+    const oldText = JSON.stringify({ filler, version: "1.0.0" });
+    const newText = JSON.stringify({ filler, version: "2.0.0" });
+    const result = computeStructuralDiff("data.json", "json", oldText, newText);
+    expect(result.error).toBeNull();
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]).toMatchObject({ path: "version", change: "changed", oldValue: '"1.0.0"', newValue: '"2.0.0"', oldLine: null, newLine: null });
+  });
+
+  it("reports an error without parsing for a YAML file over 1 MB (below the 2 MB JSON cap)", () => {
+    const oldText = `key: ${"x".repeat(1.2 * 1024 * 1024)}\n`;
+    const result = computeStructuralDiff("config.yaml", "yaml", oldText, oldText);
+    expect(result.entries).toEqual([]);
+    expect(result.truncated).toBe(false);
+    expect(result.error).toBe("File too large for a structural view (over 2 MB).");
+  });
 });
 
 describe("lockfile structural diff", () => {
@@ -361,6 +387,27 @@ describe("lockfile structural diff", () => {
     expect(byPath(result.entries, "@scope/legacy")).toMatchObject({ change: "removed", oldValue: "1.0.0" });
     // snapshots/importers are ignored entirely.
     expect(byPath(result.entries, "foo")).toBeUndefined();
+  });
+
+  it("diffs a pnpm lockfile with peer-dependency suffixes (v5 underscore and v6+ parens), both as one changed entry", () => {
+    const oldText = ["packages:", "  /react-dom/18.2.0_react@18.2.0: {}", "  react-dom@18.2.0(react@18.2.0): {}", ""].join("\n");
+    const newText = ["packages:", "  /react-dom/18.3.0_react@18.3.0: {}", "  react-dom@18.3.0(react@18.3.0): {}", ""].join("\n");
+    const result = computeStructuralDiff("pnpm-lock.yaml", "lockfile", oldText, newText);
+    expect(result.format).toBe("pnpm");
+    expect(result.error).toBeNull();
+    // Both keys name the same package; one "react-dom" entry, correctly named (not polluted by the
+    // peer suffix), with the version bump recognized in both the v5 and v6+ key shapes.
+    expect(result.entries).toHaveLength(1);
+    expect(byPath(result.entries, "react-dom")).toMatchObject({ change: "changed", oldValue: "18.2.0", newValue: "18.3.0" });
+  });
+
+  it("diffs a pnpm lockfile with a scoped package's peer-dependency suffix (v5 underscore shape)", () => {
+    const oldText = ["packages:", "  /@scope/react-dom/18.2.0_react@18.2.0: {}", ""].join("\n");
+    const newText = ["packages:", "  /@scope/react-dom/18.3.0_react@18.3.0: {}", ""].join("\n");
+    const result = computeStructuralDiff("pnpm-lock.yaml", "lockfile", oldText, newText);
+    expect(result.format).toBe("pnpm");
+    expect(result.entries).toHaveLength(1);
+    expect(byPath(result.entries, "@scope/react-dom")).toMatchObject({ change: "changed", oldValue: "18.2.0", newValue: "18.3.0" });
   });
 
   it("diffs a yarn v1 lockfile: add, remove, bump, scoped selectors", () => {
@@ -589,6 +636,55 @@ describe("lockfile structural diff", () => {
     expect(byPath(result.entries, "actionview")).toMatchObject({ change: "changed", oldValue: "7.0.4", newValue: "7.0.5" });
     expect(byPath(result.entries, "new-gem")).toMatchObject({ change: "added", newValue: "1.0.0" });
     expect(byPath(result.entries, "old-gem")).toMatchObject({ change: "removed", oldValue: "1.0.0" });
+    expect(byPath(result.entries, "rack")).toBeUndefined();
+  });
+
+  it("diffs a Gemfile.lock gem sourced from a GIT section (same specs: layout as GEM)", () => {
+    const oldText = [
+      "GIT",
+      "  remote: https://github.com/example/my_gem.git",
+      "  revision: abc123",
+      "  specs:",
+      "    my_gem (1.0.0)",
+      "",
+      "GEM",
+      "  remote: https://rubygems.org/",
+      "  specs:",
+      "    rack (2.0.0)",
+      "",
+      "PLATFORMS",
+      "  ruby",
+      "",
+      "DEPENDENCIES",
+      "  my_gem!",
+      "  rack",
+      "",
+    ].join("\n");
+    const newText = [
+      "GIT",
+      "  remote: https://github.com/example/my_gem.git",
+      "  revision: def456",
+      "  specs:",
+      "    my_gem (1.1.0)",
+      "",
+      "GEM",
+      "  remote: https://rubygems.org/",
+      "  specs:",
+      "    rack (2.0.0)",
+      "",
+      "PLATFORMS",
+      "  ruby",
+      "",
+      "DEPENDENCIES",
+      "  my_gem!",
+      "  rack",
+      "",
+    ].join("\n");
+    const result = computeStructuralDiff("Gemfile.lock", "lockfile", oldText, newText);
+    expect(result.format).toBe("bundler");
+    expect(result.error).toBeNull();
+    expect(result.entries).toHaveLength(1);
+    expect(byPath(result.entries, "my_gem")).toMatchObject({ change: "changed", oldValue: "1.0.0", newValue: "1.1.0" });
     expect(byPath(result.entries, "rack")).toBeUndefined();
   });
 

@@ -51,10 +51,22 @@ function parseNpm(text: string): VersionMap {
 
 function parsePnpmKey(rawKey: string): { name: string; version: string } | null {
   const key = rawKey.startsWith("/") ? rawKey.slice(1) : rawKey;
+  // v6+ encodes peers as a parenthesised suffix: react-dom@18.2.0(react@18.2.0).
   const parenIdx = key.indexOf("(");
-  const core = parenIdx === -1 ? key : key.slice(0, parenIdx);
-  const atIdx = core.lastIndexOf("@");
-  if (atIdx > 0) {
+  const noParen = parenIdx === -1 ? key : key.slice(0, parenIdx);
+  // v5 encodes peers as an underscore suffix straight after the version, e.g.
+  // /react-dom/18.2.0_react@18.2.0 or the "@"-separated /react-dom@18.2.0_react@18.2.0 variant.
+  // Drop it before splitting name from version: the peer's own "@"/"/" characters would otherwise
+  // be mistaken for the real name/version separator.
+  const underscoreIdx = noParen.indexOf("_");
+  const core = underscoreIdx === -1 ? noParen : noParen.slice(0, underscoreIdx);
+
+  // "name@version" shape (v6+ without parens, or the v5.4+ "@"-separated variant). The "@" that
+  // separates name from version is never the scope's own leading "@", so skip past "@scope/"
+  // before searching for it.
+  const scopeEnd = core.startsWith("@") ? Math.max(core.indexOf("/") + 1, 1) : 0;
+  const atIdx = core.indexOf("@", scopeEnd);
+  if (atIdx !== -1) {
     return { name: core.slice(0, atIdx), version: core.slice(atIdx + 1) };
   }
   // v5-style: /name/1.2.3 or /@scope/name/1.2.3 (version separated by "/", not "@version").
@@ -173,17 +185,23 @@ function parseGoSum(text: string): VersionMap {
 
 // ---------- bundler (Gemfile.lock) ----------
 
+// GEM is the rubygems.org section; GIT and PATH are gems sourced from a git repo or a local path
+// (each one block per source). All three lay out their gems the same way: a `  specs:` line
+// followed by 4-space-indented `name (version)` entries, with deeper-indented lines being that
+// gem's own dependencies (to be ignored, not re-parsed as top-level specs).
+const DEP_SECTION_HEADERS = new Set(["GEM", "GIT", "PATH"]);
+
 function parseGemfileLock(text: string): VersionMap {
   const result: VersionMap = new Map();
-  let inGem = false;
+  let inDepSection = false;
   let inSpecs = false;
   for (const line of text.split(/\r?\n/)) {
     if (/^\S/.test(line)) {
-      inGem = line.trim() === "GEM";
+      inDepSection = DEP_SECTION_HEADERS.has(line.trim());
       inSpecs = false;
       continue;
     }
-    if (!inGem) continue;
+    if (!inDepSection) continue;
     if (/^ {2}specs:\s*$/.test(line)) {
       inSpecs = true;
       continue;
