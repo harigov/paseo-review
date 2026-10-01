@@ -55,3 +55,49 @@ export function pairHunkLines(lines: DiffLine[]): LinePair[] {
 export function splitRowCount(lines: DiffLine[]): number {
   return pairHunkLines(lines).length;
 }
+
+/**
+ * Expands tabs to the next multiple of `tabSize` columns (like a terminal's default tab stops),
+ * so code indentation renders with a deterministic width instead of the browser's default tab
+ * rendering.
+ */
+export function expandTabs(text: string, tabSize = 4): string {
+  let result = "";
+  let column = 0;
+  for (const ch of text) {
+    if (ch === "\t") {
+      const width = tabSize - (column % tabSize);
+      result += " ".repeat(width);
+      column += width;
+    } else {
+      result += ch;
+      column += 1;
+    }
+  }
+  return result;
+}
+
+/**
+ * Renders whitespace visibly for whitespace-only diff lines: each space becomes "·", and each
+ * tab becomes "→" followed by "·" for the rest of its expanded width — so the exact whitespace
+ * shape (spaces vs. tabs, and how many) is visible instead of collapsing to nothing. Non-
+ * whitespace characters are left unchanged.
+ */
+export function markWhitespace(text: string, tabSize = 4): string {
+  let result = "";
+  let column = 0;
+  for (const ch of text) {
+    if (ch === "\t") {
+      const width = tabSize - (column % tabSize);
+      result += "→" + "·".repeat(Math.max(0, width - 1));
+      column += width;
+    } else if (ch === " ") {
+      result += "·";
+      column += 1;
+    } else {
+      result += ch;
+      column += 1;
+    }
+  }
+  return result;
+}

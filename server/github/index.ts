@@ -258,7 +258,7 @@ async function findRepo(slug: string): Promise<Repo | null> {
 /** Validates that `slug` is one of the repos registered as a Paseo project (the plan's stated
  * scope) and returns its canonical form. Every github RPC handler must call this before using
  * the caller-supplied repo string for a GraphQL call, a `gh` invocation, or a data-file path. */
-async function requireRepo(slug: string): Promise<Repo> {
+export async function requireRepo(slug: string): Promise<Repo> {
   const repo = await findRepo(slug);
   if (!repo) throw new Error(`"${slug}" is not a repo registered as a Paseo project.`);
   return repo;
@@ -830,7 +830,7 @@ async function getPr(repo: string, number: number, refresh?: boolean): Promise<P
   return detail;
 }
 
-function invalidatePr(repo: string, number: number): void {
+export function invalidatePr(repo: string, number: number): void {
   prCache.delete(`${repo.toLowerCase()}#${number}`);
 }
 
