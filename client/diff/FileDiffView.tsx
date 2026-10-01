@@ -8,6 +8,7 @@ import { highlightCode, resolveSyntaxColors, type HighlightToken } from "@getpas
 import { fileDiffRpc } from "../../shared/rpc";
 import type { DiffLine, FileDiff, Hunk, Thread, ValidatorFinding } from "../../shared/types";
 import { addDraft, type DraftComment } from "../review/drafts";
+import { pairHunkLines } from "./pairing";
 
 export interface FileDiffFinding extends ValidatorFinding {
   validatorId: string;
@@ -22,6 +23,7 @@ type Row =
   | { type: "collapsedMoved"; hunkIndex: number; count: number }
   | { type: "collapsedWhitespace"; hunkIndex: number; count: number }
   | { type: "line"; hunkIndex: number; lineIndex: number }
+  | { type: "pair"; hunkIndex: number; oldIndex: number | null; newIndex: number | null }
   | { type: "thread"; thread: Thread }
   | { type: "finding"; finding: FileDiffFinding };
 
@@ -77,9 +79,10 @@ function rowHeight(row: Row): number {
     case "collapsedWhitespace":
       return 26;
     case "line":
+    case "pair":
       return LINE_HEIGHT;
     case "thread":
-      return 28 + row.thread.comments.length * 46;
+      return 30 + row.thread.comments.length * 64;
     case "finding":
       return 26;
     default:
@@ -111,6 +114,7 @@ export function FileDiffView({
   threads,
   findings,
   onComment,
+  diffLayout = "inline",
 }: {
   repo: string;
   number: number;
@@ -123,8 +127,13 @@ export function FileDiffView({
   threads: Thread[];
   findings: FileDiffFinding[];
   onComment?: (draft: DraftComment) => void;
+  /** "split" renders old/new side by side; compact layouts always render inline regardless. */
+  diffLayout?: "inline" | "split";
 }) {
   const c = theme.colors;
+  // Compact layouts (narrow viewports) don't have room for two code columns, so they always
+  // fall back to the inline path regardless of the caller's requested layout.
+  const split = diffLayout === "split" && !layout.compact;
   const rpc = useRpc(fileDiffRpc);
   const toast = useToast();
   const { data: diff, isLoading, error } = useQuery<FileDiff>({
@@ -171,6 +180,26 @@ export function FileDiffView({
         return;
       }
       result.push({ type: "hunkHeader", hunkIndex });
+      if (split) {
+        pairHunkLines(hunk.lines).forEach(({ oldIndex, newIndex }) => {
+          result.push({ type: "pair", hunkIndex, oldIndex, newIndex });
+          const oldLine = oldIndex !== null ? hunk.lines[oldIndex] : null;
+          const newLine = newIndex !== null ? hunk.lines[newIndex] : null;
+          threads.forEach((thread) => {
+            const target = threadTarget(thread);
+            if (!target) return;
+            const matches =
+              target.side === "LEFT" ? oldLine !== null && oldLine.oldNo === target.number : newLine !== null && newLine.newNo === target.number;
+            if (matches) result.push({ type: "thread", thread });
+          });
+          findings.forEach((finding) => {
+            if (finding.startLine !== null && newLine !== null && newLine.newNo === finding.startLine) {
+              result.push({ type: "finding", finding });
+            }
+          });
+        });
+        return;
+      }
       hunk.lines.forEach((line, lineIndex) => {
         result.push({ type: "line", hunkIndex, lineIndex });
         threads.forEach((thread) => {
@@ -187,7 +216,7 @@ export function FileDiffView({
       });
     });
     return result;
-  }, [diff, expandedHunks, threads, findings]);
+  }, [diff, expandedHunks, threads, findings, split]);
 
   // Several row kinds (thread, and hunkHeader/finding on a narrow layout) have genuinely
   // variable height — real comment text wraps, long titles wrap — so `getItemLayout` isn't
@@ -247,6 +276,55 @@ export function FileDiffView({
     );
   }
 
+  function renderPairCell(hunkIndex: number, index: number | null, side: "old" | "new") {
+    if (index === null) {
+      return <View style={{ flex: 1, minHeight: LINE_HEIGHT, backgroundColor: c.surface1, opacity: 0.5 }} />;
+    }
+    const hunk = diff!.hunks[hunkIndex];
+    const line = hunk.lines[index];
+    const tokens = hunkTokens[hunkIndex]?.[index] ?? [];
+    const tinted = side === "old" ? line.kind === "del" : line.kind === "add";
+    const bg = tinted ? (side === "old" ? c.statusDanger : c.statusSuccess) : null;
+    const lineNo = side === "old" ? line.oldNo : line.newNo;
+    const marker = side === "old" ? (line.kind === "del" ? "−" : " ") : line.kind === "add" ? "+" : " ";
+    const target: { side: Side; number: number } | null = lineNo !== null ? { side: side === "old" ? "LEFT" : "RIGHT", number: lineNo } : null;
+    const content = tokens.length
+      ? tokens.map((token, i) => (
+          <Text key={i} style={{ color: token.style ? palette[token.style] : c.foreground }}>
+            {token.text}
+          </Text>
+        ))
+      : line.text || " ";
+    return (
+      <View style={{ flex: 1, flexDirection: "row", minHeight: LINE_HEIGHT, opacity: line.moved ? 0.55 : 1 }}>
+        {bg ? <View pointerEvents="none" style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: bg, opacity: 0.12 }} /> : null}
+        <Pressable
+          accessibilityRole="button"
+          disabled={!target}
+          onPress={() => target && openComposer(target.side, target.number)}
+          style={{ flexDirection: "row" }}
+        >
+          <Text style={{ ...code, width: 38, textAlign: "right", color: c.foregroundMuted }}>{lineNo ?? ""}</Text>
+        </Pressable>
+        <Text style={{ ...code, width: 16, color: bg ?? c.foregroundMuted }}>{marker}</Text>
+        {line.moved ? <Text style={{ ...code, width: 28, color: c.accent, fontSize: 10 }}>↔ moved</Text> : null}
+        <Text selectable style={{ ...code, flex: 1, paddingRight: 12 }} numberOfLines={1}>
+          {content}
+        </Text>
+      </View>
+    );
+  }
+
+  function renderPair(hunkIndex: number, oldIndex: number | null, newIndex: number | null) {
+    return (
+      <View style={{ flexDirection: "row", minHeight: LINE_HEIGHT }}>
+        {renderPairCell(hunkIndex, oldIndex, "old")}
+        <View style={{ width: 1, backgroundColor: c.border }} />
+        {renderPairCell(hunkIndex, newIndex, "new")}
+      </View>
+    );
+  }
+
   function renderItem({ item }: { item: Row }) {
     switch (item.type) {
       case "truncated":
@@ -277,19 +355,21 @@ export function FileDiffView({
         );
       case "line":
         return renderLine(item.hunkIndex, item.lineIndex);
+      case "pair":
+        return renderPair(item.hunkIndex, item.oldIndex, item.newIndex);
       case "thread":
         return (
           <View style={{ padding: 8, paddingLeft: 16, backgroundColor: c.surface1, gap: 4 }}>
             <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
               <Icon name="MessageCircle" size={12} color={c.foregroundMuted} />
-              <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+              <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
                 {item.thread.isResolved ? "Resolved" : "Open"} thread{item.thread.isOutdated ? " · outdated" : ""}
               </Text>
             </View>
             {item.thread.comments.map((comment) => (
               <View key={comment.id} style={{ gap: 1 }}>
-                <Text style={{ color: c.foreground, fontSize: 11, fontWeight: "600" }}>{comment.author}</Text>
-                <Text style={{ color: c.foreground, fontSize: 12 }} numberOfLines={3}>
+                <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>{comment.author}</Text>
+                <Text style={{ color: c.foreground, fontSize: 14, lineHeight: 20 }} numberOfLines={6}>
                   {comment.body}
                 </Text>
               </View>
