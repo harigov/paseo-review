@@ -1,7 +1,15 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRpc } from "@getpaseo/plugin/client";
 import { uiStateGetRpc, uiStateSetRpc } from "../../shared/rpc";
-import { DEFAULT_UI_STATE, markReviewed as pureMarkReviewed, pushRecent, type RecentPr, type UiLocation, type UiState } from "../../shared/ui-state";
+import {
+  DEFAULT_UI_STATE,
+  markReviewed as pureMarkReviewed,
+  pushRecent,
+  type InboxFilters,
+  type RecentPr,
+  type UiLocation,
+  type UiState,
+} from "../../shared/ui-state";
 
 // Module-level UI-state store for the PR Review surface. Plugin surfaces (0.10 hosts) mount
 // fresh every time the user opens them, which would otherwise always show the inbox — this
@@ -144,6 +152,15 @@ export function useLastLocation(): UiLocation {
 /** Most-recently-opened PRs, newest first, capped at 20. */
 export function useRecentPrs(): RecentPr[] {
   return useUiState().recentPrs;
+}
+
+/** Inbox filters as last left by the user. */
+export function useInboxFilters(): InboxFilters {
+  return useUiState().inboxFilters;
+}
+
+export function rememberInboxFilters(patch: Partial<InboxFilters>): void {
+  setState({ ...state, inboxFilters: { ...state.inboxFilters, ...patch } });
 }
 
 // ---------- non-hook mutators ----------

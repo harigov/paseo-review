@@ -134,6 +134,7 @@ beforeAll(() => {
     ensurePrRefs: async () => ({ mirrorPath: "/tmp/mirror", headSha: "head123", baseSha: "base123", mergeBaseSha: "merge123" }),
     getFileDiff: async () => ({ path: "src/index.ts", oldPath: null, binary: false, truncated: false, hunks: [] }),
     getStructuralDiff: async () => null,
+      getFileLines: async () => ({ lines: [], totalLines: 0 }),
     getRawDiff: async () => "diff --git a/src/index.ts b/src/index.ts\n+added line\n",
     readFileAtRef: async (_repo, _ref, filePath) => (filePath === "REVIEW.md" ? "Review carefully." : null),
     searchAtRef: async () => ["src/index.ts:1:added line"],

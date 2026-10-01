@@ -3,7 +3,7 @@ import { pollJob, startJob } from "../core/jobs";
 import { handle } from "../core/handle";
 import { services } from "../core/services";
 import type { AnalysisService, ValidationUnit } from "../core/services";
-import { fileDiffRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
+import { fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
 import type { Analysis, FileDiff, PrDetail, StructuralDiff } from "../../shared/types";
 import { annotateMovesAndWhitespace, parseUnifiedDiff, toFileDiff } from "./diff";
 import { ensureMirror, fetchPrRefs, fetchSha, grepAtRef, mergeBase as computeMergeBase, objectExists, rawDiff, showFile } from "./git";
@@ -22,6 +22,22 @@ import { getLocalViewedRecords } from "../github/viewed-store";
  * different-cased calls for the same repo fragment into different cache files (and a
  * genuinely malformed string reaches `repoDataFile` with no owner/name to report).
  */
+/** Small LRU for per-file structural diffs: deterministic per (merge base, head, path), and the
+ * YAML parse of a big lockfile is the slow part of that RPC. */
+const STRUCTURAL_CACHE_MAX = 200;
+const structuralCache = new Map<string, StructuralDiff>();
+function cacheStructural(key: string, value: StructuralDiff): StructuralDiff {
+  structuralCache.delete(key);
+  structuralCache.set(key, value);
+  if (structuralCache.size > STRUCTURAL_CACHE_MAX) {
+    const oldest = structuralCache.keys().next().value;
+    if (oldest !== undefined) structuralCache.delete(oldest);
+  }
+  return value;
+}
+
+const FILE_LINES_MAX = 500;
+
 async function canonicalSlug(repo: string): Promise<string> {
   try {
     return (await resolveRepo(repo)).slug;
@@ -144,12 +160,38 @@ export function createAnalysisService(): AnalysisService {
       const headSha = detail.summary.headSha;
       await ensureHeadMirrored(mirror, detail, number);
       const mergeBaseSha = await computeMergeBase(mirror, detail.baseSha, headSha, detail.summary.baseRef);
+      const cacheKey = `${repoObj.slug.toLowerCase()}#${number}:${mergeBaseSha}:${headSha}:${filePath}`;
+      const cached = structuralCache.get(cacheKey);
+      if (cached) return cached;
       // A renamed file's base-side content lives at its old path.
       const analyzed = loadAnalysis(repoObj.slug, number)?.files.find((f) => f.path === filePath) ?? null;
       const oldPath = analyzed?.oldPath ?? filePath;
       const oldText = analyzed?.status === "added" ? null : await showFile(mirror, mergeBaseSha, oldPath);
       const newText = analyzed?.status === "deleted" ? null : await showFile(mirror, headSha, filePath);
-      return computeStructuralDiff(filePath, kind, oldText, newText);
+      return cacheStructural(cacheKey, computeStructuralDiff(filePath, kind, oldText, newText));
+    },
+
+    async getFileLines(repo, number, filePath, side, start, end) {
+      if (end < start) throw new Error("Invalid line range.");
+      if (end - start + 1 > FILE_LINES_MAX) throw new Error(`At most ${FILE_LINES_MAX} lines per request.`);
+      const repoObj = await resolveRepo(repo);
+      const detail = await services.github.getPr(repo, number);
+      const mirror = await ensureMirror(repoObj);
+      const headSha = detail.summary.headSha;
+      await ensureHeadMirrored(mirror, detail, number);
+      let ref = headSha;
+      let path = filePath;
+      if (side === "base") {
+        ref = await computeMergeBase(mirror, detail.baseSha, headSha, detail.summary.baseRef);
+        const analyzed = loadAnalysis(repoObj.slug, number)?.files.find((f) => f.path === filePath) ?? null;
+        path = analyzed?.oldPath ?? filePath;
+      }
+      const content = await showFile(mirror, ref, path);
+      if (content === null) return { lines: [], totalLines: 0 };
+      const all = content.split("\n");
+      // A trailing newline yields one empty final element that isn't a real line.
+      if (all.length && all[all.length - 1] === "") all.pop();
+      return { lines: all.slice(start - 1, end), totalLines: all.length };
     },
 
     async getRawDiff(repo, number, filePath) {
@@ -220,6 +262,10 @@ export function registerAnalysisHandlers(server: PluginServerContext): void {
 
   handle(server, fileDiffRpc, async ({ repo, number, path, scope }) => {
     return services.analysis.getFileDiff(repo, number, path, scope);
+  });
+
+  handle(server, fileLinesRpc, async ({ repo, number, path, side, start, end }) => {
+    return services.analysis.getFileLines(repo, number, path, side, start, end);
   });
 
   handle(server, fileStructuralDiffRpc, async ({ repo, number, path }) => {

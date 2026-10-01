@@ -126,6 +126,19 @@ export const fileDiffRpc = defineRpc({
   output: FileDiffSchema,
 });
 
+/** Lines of a file at the PR head or merge base, for expanding context around a hunk. */
+export const fileLinesRpc = defineRpc({
+  name: "prr.file.lines",
+  input: PrRef.extend({
+    path: z.string(),
+    side: z.enum(["base", "head"]),
+    /** 1-based inclusive range; at most 500 lines per call. */
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+  }),
+  output: z.object({ lines: z.array(z.string()), totalLines: z.number() }),
+});
+
 export const fileStructuralDiffRpc = defineRpc({
   name: "prr.file.structural",
   input: PrRef.extend({ path: z.string() }),

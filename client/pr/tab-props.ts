@@ -1,5 +1,6 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { Analysis, DiffLayout, PrDetail, ReadingOrder } from "../../shared/types";
+import type { DiffDensity } from "../ui/tokens";
 
 /** Props every PR tab receives from the PR screen shell (client/app). */
 export interface PrTabContext {
@@ -16,6 +17,11 @@ export interface PrTabContext {
   /** Inline (one column) or split (old | new) file diffs. Seeded from settings; toggled per session. */
   diffLayout: DiffLayout;
   setDiffLayout(layout: DiffLayout): void;
+  /** Code size / row height for diffs, seeded from settings. */
+  diffDensity: DiffDensity;
+  /** A file the module tab should expand and scroll to (set by "Next unviewed" or the outline); cleared by the tab once handled. */
+  focusPath: string | null;
+  setFocusPath(path: string | null): void;
   /** Re-fetch PR detail + analysis (e.g. after toggling viewed). */
   refresh(): void;
   /** Force a fresh analysis run (e.g. after submitting a review, so "since my last review" moves). */

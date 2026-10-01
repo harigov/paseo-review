@@ -70,6 +70,7 @@ describe("precompute status (AG5 / AG10): lastError is not clobbered", () => {
       ensurePrRefs: async () => ({ mirrorPath: "/tmp/mirror", headSha: "h", baseSha: "b", mergeBaseSha: "m" }),
       getFileDiff: async () => ({ path: "x", oldPath: null, binary: false, truncated: false, hunks: [] }),
       getStructuralDiff: async () => null,
+      getFileLines: async () => ({ lines: [], totalLines: 0 }),
       getRawDiff: async () => "",
       readFileAtRef: async () => null,
       searchAtRef: async () => [],
@@ -124,6 +125,7 @@ describe("collectGuidanceFiles ancestor walk (AG9)", () => {
       ensurePrRefs: async () => ({ mirrorPath: "/tmp/mirror", headSha: "h", baseSha: "b", mergeBaseSha: "m" }),
       getFileDiff: async () => ({ path: "x", oldPath: null, binary: false, truncated: false, hunks: [] }),
       getStructuralDiff: async () => null,
+      getFileLines: async () => ({ lines: [], totalLines: 0 }),
       getRawDiff: async () => "",
       // Only these two files "exist" at this ref: a root AGENTS.md and a nested REVIEW.md.
       readFileAtRef: async (_repo, _ref, filePath) => {

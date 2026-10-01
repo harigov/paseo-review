@@ -30,12 +30,24 @@ export const RecentPrSchema = z.object({
 });
 export type RecentPr = z.infer<typeof RecentPrSchema>;
 
+export const InboxFiltersSchema = z.object({
+  repo: z.string().nullable().default(null),
+  hideDrafts: z.boolean().default(false),
+  ci: z.enum(["any", "failing", "passing"]).default("any"),
+  review: z.enum(["any", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]).default("any"),
+  sort: z.enum(["attention", "updated", "created", "size", "severity"]).default("attention"),
+});
+export type InboxFilters = z.infer<typeof InboxFiltersSchema>;
+export const DEFAULT_INBOX_FILTERS: InboxFilters = InboxFiltersSchema.parse({});
+
 export const UiStateSchema = z.object({
   version: z.literal(1).default(1),
   lastLocation: UiLocationSchema.default({ kind: "inbox" }),
   // Defensive upper bound for anything we load from disk; `pushRecent` enforces the real
   // (tighter) product cap of 20 on every write, so a well-behaved client never gets near this.
   recentPrs: z.array(RecentPrSchema).max(50).default([]),
+  /** Last inbox filters, restored when the inbox opens. */
+  inboxFilters: InboxFiltersSchema.default(DEFAULT_INBOX_FILTERS),
 });
 export type UiState = z.infer<typeof UiStateSchema>;
 

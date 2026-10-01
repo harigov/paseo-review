@@ -8,6 +8,7 @@ import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
 import { prAnalyzeRpc } from "../../shared/rpc";
 import { prReviewSettings } from "../../shared/settings";
 import type { DiffLayout, ReadingOrder } from "../../shared/types";
+import type { DiffDensity } from "../ui/tokens";
 import type { PrTabContext } from "../pr/tab-props";
 import { Dot, riskColor } from "../ui/chips";
 import { OverviewTab } from "./OverviewTab";
@@ -54,6 +55,8 @@ export function PrScreen(
   );
   const [readingOrder, setReadingOrder] = useState<ReadingOrder>("foundations");
   const [diffLayout, setDiffLayout] = useState<DiffLayout>("inline");
+  const [diffDensity, setDiffDensity] = useState<DiffDensity>("comfortable");
+  const [focusPath, setFocusPath] = useState<string | null>(null);
   const [sinceLastReview, setSinceLastReview] = useState(false);
   const [initializedReadingOrder, setInitializedReadingOrder] = useState(false);
   const [statusOpen, setStatusOpen] = useState(true);
@@ -70,6 +73,7 @@ export function PrScreen(
     if (!initializedReadingOrder && settings.status === "ready") {
       setReadingOrder(settings.values.readingOrder);
       setDiffLayout(settings.values.diffLayout);
+      setDiffDensity(settings.values.diffDensity);
       setInitializedReadingOrder(true);
     }
   }, [initializedReadingOrder, settings.status, settings.status === "ready" ? settings.values.readingOrder : null]);
@@ -154,12 +158,15 @@ export function PrScreen(
       sinceLastReview,
       diffLayout,
       setDiffLayout,
+      diffDensity,
+      focusPath,
+      setFocusPath,
       refresh,
       reanalyze,
       openChat,
       openTab: selectTab,
     }),
-    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, diffLayout, refresh, reanalyze, openChat, selectTab],
+    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, diffLayout, diffDensity, focusPath, refresh, reanalyze, openChat, selectTab],
   );
 
   const moduleTabs = useMemo(() => {

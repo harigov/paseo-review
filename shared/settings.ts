@@ -58,6 +58,8 @@ export const PrReviewSettingsSchema = z.object({
   readingOrder: z.enum(["foundations", "risk", "chrono"]).default("foundations"),
   /** Default diff layout for file diffs; the PR screen has a per-session toggle. */
   diffLayout: DiffLayoutSchema.default("inline"),
+  /** Code size / row height in the diff viewer. */
+  diffDensity: z.enum(["comfortable", "compact"]).default("comfortable"),
 });
 
 export type PrReviewSettings = z.infer<typeof PrReviewSettingsSchema>;
