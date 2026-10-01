@@ -13,6 +13,7 @@ import {
   ValidatorSchema,
   ViewedStateSchema,
 } from "./types";
+import { UiStateSchema } from "./ui-state";
 
 // Every RPC finishes well under the daemon's 30 s cap. Long work starts a job and is polled.
 
@@ -189,6 +190,20 @@ export const chatStartRpc = defineRpc({
   input: PrRef.extend({ seed: z.string().optional(), agentChoiceId: z.string().optional() }),
   /** Job result: ChatStartResult. Creating the PR worktree can exceed the 30 s RPC cap. */
   output: z.object({ jobId: z.string() }),
+});
+
+// ---------- UI state (server/ui-state) ----------
+
+export const uiStateGetRpc = defineRpc({
+  name: "prr.ui.get",
+  input: z.object({}),
+  output: z.object({ state: UiStateSchema }),
+});
+
+export const uiStateSetRpc = defineRpc({
+  name: "prr.ui.set",
+  input: z.object({ state: UiStateSchema }),
+  output: Ok,
 });
 
 export const precomputeStatusRpc = defineRpc({

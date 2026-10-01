@@ -7,6 +7,7 @@ import { setSettingsHandle } from "./server/core/settings";
 import { createDecisionService } from "./server/decide";
 import { createGitHubService, registerGitHubHandlers } from "./server/github";
 import { createValidatorService, registerValidatorHandlers } from "./server/validators";
+import { registerUiStateHandlers } from "./server/ui-state";
 import { prReviewSettings } from "./shared/settings";
 
 export default function contribute(server: PluginServerContext) {
@@ -22,6 +23,7 @@ export default function contribute(server: PluginServerContext) {
   registerAnalysisHandlers(server);
   registerValidatorHandlers(server);
   registerAgentHandlers(server);
+  registerUiStateHandlers(server);
 
   // Capture the daemon API from lifecycle events too, so precompute can start without a UI visit.
   const stopHook = server.on("agent.turn_ended", (_event, context) => rememberPaseo(context.paseo));
