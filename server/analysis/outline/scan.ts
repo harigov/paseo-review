@@ -22,12 +22,36 @@ export interface ScanResult {
 
 const DEFAULT_MAX_LINES = 4000;
 
+/** Suffixes that mean a header line is not finished yet — the declaration continues onto the
+ * next line even though no brace has opened and no semicolon has been seen (e.g. a body-less
+ * arrow function whose parameter list wraps, or a multi-line generic constraint). */
+const CONTINUATION_SUFFIXES = [",", "(", "[", "{", "=>", "=", "&&", "||", "?", ":", "+", "-", "*", "/", "|", "&", ".", "<"];
+
+function endsWithContinuation(s: string): boolean {
+  return CONTINUATION_SUFFIXES.some((tok) => s.endsWith(tok));
+}
+
+function nextNonBlankLineIdx(lines: string[], fromIdx: number): number {
+  for (let k = fromIdx; k < lines.length; k++) {
+    if (!isBlankLine(lines[k])) return k;
+  }
+  return -1;
+}
+
 /**
  * Scans forward from `startLineIdx` (the declaration's header line) to find where the
  * declaration ends: either the line where a brace opened on/after the header returns to depth
  * zero, or — if no brace is ever opened — the first top-level `;` (a body-less declaration like
- * a variable, type alias, or an interface method stub). Ignores braces/semicolons inside string
- * literals, line comments, and block comments. Best-effort only: doesn't understand nested
+ * a variable, type alias, or an interface method stub), or the end of the header line itself for
+ * a body-less declaration in a semicolon-free codebase (e.g. `const inc = (a) => a + 1`), judged
+ * by the next line starting back at column 0. Ignores braces/semicolons inside string literals,
+ * line comments, and block comments. A `{`/`}` pair is also ignored while inside a parenthesised
+ * parameter list or (before the body starts) inside angle brackets, so a destructured parameter
+ * type or a generic constraint — `function F({ a }: { a: string })`, `Promise<{ a: string }>`,
+ * `class Foo<T extends { id: string }>` — isn't mistaken for the body; and when a depth-zero
+ * brace group closes but the rest of the line (after whitespace) starts with another `{`, that
+ * group was a bare object-literal return type (`function f(): { a: string } {`), not the body,
+ * so scanning keeps going for the real one. Best-effort only: doesn't understand nested
  * template-literal interpolation or (for Rust) lifetime-annotation quotes — callers pass
  * `stringChars` without `'` where that would misfire.
  */
@@ -38,6 +62,10 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
   // multi-line destructured React props object — are not the body; the body brace comes after
   // the parentheses close.
   let parenDepth = 0;
+  // Angle-bracket depth, tracked only before the body starts and outside parentheses — braces
+  // inside a generic constraint or return-type argument (`Promise<{ a: string }>`) are ignored
+  // just like braces inside parens.
+  let angleDepth = 0;
   let inBlockComment = false;
   let inString: string | null = null;
   const limit = Math.min(lines.length, startLineIdx + maxLines);
@@ -45,13 +73,17 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
   for (let li = startLineIdx; li < limit; li++) {
     const line = lines[li];
     let ci = 0;
+    let lineContentEnd = line.length;
+    let openBlockCommentAt: number | null = null;
     while (ci < line.length) {
       if (inBlockComment) {
         const closeIdx = line.indexOf(opts.blockComment![1], ci);
         if (closeIdx === -1) {
+          lineContentEnd = Math.min(lineContentEnd, openBlockCommentAt ?? 0);
           ci = line.length;
         } else {
           inBlockComment = false;
+          openBlockCommentAt = null;
           ci = closeIdx + opts.blockComment![1].length;
         }
         continue;
@@ -67,11 +99,13 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
         continue;
       }
       if (opts.lineComment && line.startsWith(opts.lineComment, ci)) {
+        lineContentEnd = Math.min(lineContentEnd, ci);
         ci = line.length;
         continue;
       }
       if (opts.blockComment && line.startsWith(opts.blockComment[0], ci)) {
         inBlockComment = true;
+        openBlockCommentAt = ci;
         ci += opts.blockComment[0].length;
         continue;
       }
@@ -91,8 +125,20 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
         ci++;
         continue;
       }
+      if (!sawBrace && parenDepth === 0) {
+        if (ch === "<") {
+          angleDepth++;
+          ci++;
+          continue;
+        }
+        if (ch === ">") {
+          if (line[ci - 1] !== "=") angleDepth = Math.max(0, angleDepth - 1);
+          ci++;
+          continue;
+        }
+      }
       if (ch === "{") {
-        if (parenDepth === 0) {
+        if (parenDepth === 0 && angleDepth === 0) {
           depth++;
           sawBrace = true;
         }
@@ -101,14 +147,38 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
       }
       if (ch === "}") {
         ci++;
-        if (parenDepth === 0) {
+        if (parenDepth === 0 && angleDepth === 0) {
           depth--;
-          if (sawBrace && depth <= 0) return { endLineIdx: li, hasBody: true };
+          if (sawBrace && depth <= 0) {
+            let restIdx = ci;
+            while (restIdx < line.length && (line[restIdx] === " " || line[restIdx] === "\t")) restIdx++;
+            if (restIdx < line.length && line[restIdx] === "{") {
+              // The group that just closed was a type literal (e.g. a bare object-literal
+              // return type), not the body — the real body brace follows later on this line.
+              sawBrace = false;
+              depth = 0;
+            } else {
+              return { endLineIdx: li, hasBody: true };
+            }
+          }
         }
         continue;
       }
       if (ch === ";" && depth === 0 && parenDepth === 0 && !sawBrace) return { endLineIdx: li, hasBody: false };
       ci++;
+    }
+
+    // No body brace seen yet and not mid-parameter-list: a body-less declaration in a
+    // semicolon-free codebase ends on its header line once the line doesn't trail off with a
+    // continuation token and the next line doesn't keep going at the same (or deeper) indent.
+    if (!sawBrace && parenDepth === 0) {
+      const effective = line.slice(0, lineContentEnd).trimEnd();
+      if (effective.length > 0 && !endsWithContinuation(effective)) {
+        const nextIdx = nextNonBlankLineIdx(lines, li + 1);
+        if (nextIdx === -1 || indentWidth(lines[nextIdx]) === 0) {
+          return { endLineIdx: li, hasBody: false };
+        }
+      }
     }
   }
   return { endLineIdx: Math.max(startLineIdx, limit - 1), hasBody: sawBrace };

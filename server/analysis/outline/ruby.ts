@@ -14,10 +14,13 @@ interface Header {
 }
 
 /**
- * Ruby: `def`/`def self.`/`class`/`module`, nested by indentation (same end-of-range rule as
- * Python: ends at the line before the next declaration at the same or lower indentation,
- * trailing blank lines excluded). Ruby has no reliable regex-detectable access modifier, so
- * every declaration is reported as exported.
+ * Ruby: `def`/`def self.`/`class`/`module`, nested by indentation. A declaration ends at the
+ * first following line with indentation at or below the header's whose trimmed text is `end`
+ * (that line inclusive, since Ruby closes every def/class/module with its own `end`); if a line
+ * at or below the header's indentation turns up first that isn't `end` — a malformed block, or
+ * simply no closing `end` before EOF — the declaration ends on the last non-blank line before
+ * it instead, so a trailing module-level statement is never folded in. Ruby has no reliable
+ * regex-detectable access modifier, so every declaration is reported as exported.
  */
 export function extractRuby(content: string): Declaration[] {
   const lines = content.split("\n");
@@ -50,11 +53,16 @@ export function extractRuby(content: string): Declaration[] {
     const qualified = container ? `${container.qualified}.${header.localName}` : header.localName;
 
     let endLineIdx = lines.length - 1;
-    for (let h2 = h + 1; h2 < headers.length; h2++) {
-      if (headers[h2].indent <= header.indent) {
-        endLineIdx = headers[h2].lineIdx - 1;
+    let lastNonBlank = header.lineIdx;
+    for (let k = header.lineIdx + 1; k < lines.length; k++) {
+      const line = lines[k];
+      if (isBlankLine(line)) continue;
+      if (indentWidth(line) <= header.indent) {
+        endLineIdx = line.trim() === "end" ? k : lastNonBlank;
         break;
       }
+      lastNonBlank = k;
+      endLineIdx = k;
     }
     while (endLineIdx > header.lineIdx && isBlankLine(lines[endLineIdx])) endLineIdx--;
 

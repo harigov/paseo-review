@@ -126,18 +126,25 @@ function matchWithinFile(oldDecls: Declaration[], newDecls: Declaration[]) {
 }
 
 /**
- * Counts add/del lines of the file's hunks whose line number (newNo for add, oldNo for del)
- * falls inside `[start, end]` — the entry's new range for added/modified/signature/renamed/
- * moved-destination entries, or its old range for removed/moved-source entries (callers pass
- * whichever applies; both add and del lines are counted against that single range).
+ * Counts add/del lines of the file's hunks that fall inside the entry's range: del lines (which
+ * only carry `oldNo`) are tested against `[oldStart, oldEnd]`, add lines (`newNo`) against
+ * `[newStart, newEnd]`. An entry missing one side of the range (e.g. an `added` entry has no old
+ * range, a `removed` entry has no new range) only counts against the side it has.
  */
-function countChangedLines(file: ParsedFile, start: number | null, end: number | null): number {
-  if (start === null || end === null) return 0;
+function countChangedLines(
+  file: ParsedFile,
+  oldStart: number | null,
+  oldEnd: number | null,
+  newStart: number | null,
+  newEnd: number | null,
+): number {
   let count = 0;
   for (const hunk of file.hunks) {
     for (const line of hunk.lines) {
-      if (line.kind === "add" && line.newNo !== null && line.newNo >= start && line.newNo <= end) count++;
-      else if (line.kind === "del" && line.oldNo !== null && line.oldNo >= start && line.oldNo <= end) count++;
+      if (line.kind === "add" && newStart !== null && newEnd !== null && line.newNo !== null && line.newNo >= newStart && line.newNo <= newEnd)
+        count++;
+      else if (line.kind === "del" && oldStart !== null && oldEnd !== null && line.oldNo !== null && line.oldNo >= oldStart && line.oldNo <= oldEnd)
+        count++;
     }
   }
   return count;
@@ -156,7 +163,7 @@ function makeSignatureOrModifiedEntry(file: ParsedFile, oldD: Declaration, newD:
       newEnd: newD.endLine,
       oldStart: oldD.startLine,
       oldEnd: oldD.endLine,
-      changedLines: countChangedLines(file, newD.startLine, newD.endLine),
+      changedLines: countChangedLines(file, oldD.startLine, oldD.endLine, newD.startLine, newD.endLine),
       counterpart: null,
     };
   }
@@ -172,7 +179,7 @@ function makeSignatureOrModifiedEntry(file: ParsedFile, oldD: Declaration, newD:
       newEnd: newD.endLine,
       oldStart: oldD.startLine,
       oldEnd: oldD.endLine,
-      changedLines: countChangedLines(file, newD.startLine, newD.endLine),
+      changedLines: countChangedLines(file, oldD.startLine, oldD.endLine, newD.startLine, newD.endLine),
       counterpart: null,
     };
   }
@@ -191,7 +198,7 @@ function makeAddedEntry(file: ParsedFile, d: Declaration): OutlineEntry {
     newEnd: d.endLine,
     oldStart: null,
     oldEnd: null,
-    changedLines: countChangedLines(file, d.startLine, d.endLine),
+    changedLines: countChangedLines(file, null, null, d.startLine, d.endLine),
     counterpart: null,
   };
 }
@@ -208,7 +215,7 @@ function makeRemovedEntry(file: ParsedFile, d: Declaration): OutlineEntry {
     newEnd: null,
     oldStart: d.startLine,
     oldEnd: d.endLine,
-    changedLines: countChangedLines(file, d.startLine, d.endLine),
+    changedLines: countChangedLines(file, d.startLine, d.endLine, null, null),
     counterpart: null,
   };
 }
@@ -225,7 +232,7 @@ function makeRenamedEntry(file: ParsedFile, newD: Declaration, oldD: Declaration
     newEnd: newD.endLine,
     oldStart: oldD.startLine,
     oldEnd: oldD.endLine,
-    changedLines: countChangedLines(file, newD.startLine, newD.endLine),
+    changedLines: countChangedLines(file, oldD.startLine, oldD.endLine, newD.startLine, newD.endLine),
     counterpart: { path: file.path, name: oldD.name },
   };
 }
@@ -242,7 +249,7 @@ function makeMovedNewEntry(newFile: ParsedFile, newD: Declaration, oldFile: Pars
     newEnd: newD.endLine,
     oldStart: null,
     oldEnd: null,
-    changedLines: countChangedLines(newFile, newD.startLine, newD.endLine),
+    changedLines: countChangedLines(newFile, null, null, newD.startLine, newD.endLine),
     counterpart: { path: oldFile.path, name: oldD.name },
   };
 }
@@ -259,7 +266,7 @@ function makeMovedOldEntry(oldFile: ParsedFile, oldD: Declaration, newFile: Pars
     newEnd: null,
     oldStart: oldD.startLine,
     oldEnd: oldD.endLine,
-    changedLines: countChangedLines(oldFile, oldD.startLine, oldD.endLine),
+    changedLines: countChangedLines(oldFile, oldD.startLine, oldD.endLine, null, null),
     counterpart: { path: newFile.path, name: newD.name },
   };
 }
@@ -306,8 +313,26 @@ export async function computeOutlines(files: ParsedFile[], readFile: ReadFile): 
   // Cross-file rename/move resolution. `oldPool` holds every unmatched old declaration in the
   // PR; a new declaration first looks for an unconsumed candidate in its own file (rename),
   // then anywhere else in the PR (moved), and only becomes "added" when neither is found.
-  const oldPool: { fw: FileWork; decl: Declaration; consumed: boolean }[] = [];
-  for (const fw of work) for (const decl of fw.unmatchedOld) oldPool.push({ fw, decl, consumed: false });
+  // `oldByKey` indexes the (substantial-bodied) entries of `oldPool` by `kind:bodyHash` so each
+  // new declaration does a bucket lookup instead of a full scan of every unmatched old
+  // declaration in the PR — same first-match-wins semantics (bucket order mirrors `oldPool`
+  // insertion order: file-by-file, then declaration order within a file), just O(1) per lookup
+  // instead of O(n).
+  type OldCandidate = { fw: FileWork; decl: Declaration; consumed: boolean };
+  const oldPool: OldCandidate[] = [];
+  const oldByKey = new Map<string, OldCandidate[]>();
+  for (const fw of work) {
+    for (const decl of fw.unmatchedOld) {
+      const candidate: OldCandidate = { fw, decl, consumed: false };
+      oldPool.push(candidate);
+      if (decl.bodySubstantial) {
+        const key = `${decl.kind}:${decl.bodyHash}`;
+        const bucket = oldByKey.get(key);
+        if (bucket) bucket.push(candidate);
+        else oldByKey.set(key, [candidate]);
+      }
+    }
+  }
 
   for (const fw of work) {
     for (const newD of fw.unmatchedNew) {
@@ -315,17 +340,14 @@ export async function computeOutlines(files: ParsedFile[], readFile: ReadFile): 
         fw.entries.push(makeAddedEntry(fw.file, newD));
         continue;
       }
-      const sameFileMatch = oldPool.find(
-        (o) => !o.consumed && o.fw === fw && o.decl.bodySubstantial && o.decl.kind === newD.kind && o.decl.bodyHash === newD.bodyHash,
-      );
+      const bucket = oldByKey.get(`${newD.kind}:${newD.bodyHash}`);
+      const sameFileMatch = bucket?.find((o) => !o.consumed && o.fw === fw);
       if (sameFileMatch) {
         sameFileMatch.consumed = true;
         fw.entries.push(makeRenamedEntry(fw.file, newD, sameFileMatch.decl));
         continue;
       }
-      const crossFileMatch = oldPool.find(
-        (o) => !o.consumed && o.fw !== fw && o.decl.bodySubstantial && o.decl.kind === newD.kind && o.decl.bodyHash === newD.bodyHash,
-      );
+      const crossFileMatch = bucket?.find((o) => !o.consumed && o.fw !== fw);
       if (crossFileMatch) {
         crossFileMatch.consumed = true;
         fw.entries.push(makeMovedNewEntry(fw.file, newD, crossFileMatch.fw.file, crossFileMatch.decl));
