@@ -115,7 +115,6 @@ export function FileDiffView({
   threads,
   findings,
   onComment,
-  diffLayout = "inline",
 }: {
   repo: string;
   number: number;
@@ -130,8 +129,6 @@ export function FileDiffView({
   threads: Thread[];
   findings: FileDiffFinding[];
   onComment?: (draft: DraftComment) => void;
-  /** "split" renders old/new side by side; compact layouts always render inline regardless. */
-  diffLayout?: "inline" | "split";
 }) {
   const c = theme.colors;
   // Compact layouts (narrow viewports) don't have room for two code columns, so they always
