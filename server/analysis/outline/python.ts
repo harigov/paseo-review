@@ -12,11 +12,17 @@ interface Header {
   lineIdx: number;
 }
 
+function isCommentLine(line: string): boolean {
+  return line.trimStart().startsWith("#");
+}
+
 /**
  * Python: `def`/`async def`/`class`, nested by indentation (methods under a class become
- * "Class.method"). A declaration ends at the line before the next declaration at the same or
- * lower indentation (anywhere in the file), trimmed of trailing blank lines — there's no brace
- * to balance, so this is the whole end-of-range rule.
+ * "Class.method"). A declaration ends at the last non-blank, non-comment line whose indentation
+ * is greater than the header's — there's no brace to balance, so this is the whole end-of-range
+ * rule. Scanning stops as soon as a non-blank line at or below the header's indentation is seen
+ * (a sibling declaration, or any other module/class-level statement), so such lines are never
+ * folded into the preceding declaration's range even when nothing else follows them.
  */
 export function extractPython(content: string): Declaration[] {
   const lines = content.split("\n");
@@ -45,14 +51,13 @@ export function extractPython(content: string): Declaration[] {
     const kind: OutlineKind = header.kind === "function" && container?.isClass ? "method" : header.kind;
     const exported = !header.localName.startsWith("_");
 
-    let endLineIdx = lines.length - 1;
-    for (let h2 = h + 1; h2 < headers.length; h2++) {
-      if (headers[h2].indent <= header.indent) {
-        endLineIdx = headers[h2].lineIdx - 1;
-        break;
-      }
+    let endLineIdx = header.lineIdx;
+    for (let k = header.lineIdx + 1; k < lines.length; k++) {
+      const line = lines[k];
+      if (isBlankLine(line)) continue;
+      if (indentWidth(line) <= header.indent) break;
+      if (!isCommentLine(line)) endLineIdx = k;
     }
-    while (endLineIdx > header.lineIdx && isBlankLine(lines[endLineIdx])) endLineIdx--;
 
     decls.push(buildDeclaration({ name: qualified, kind, exported, headerLine: lines[header.lineIdx], startLineIdx: header.lineIdx, endLineIdx, lines }));
     stack.push({ indent: header.indent, qualified, isClass: header.kind === "class" });

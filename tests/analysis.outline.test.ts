@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiff, type ParsedFile } from "../server/analysis/diff";
 import { computeOutlines, OUTLINE_MAX_BYTES, outlineLanguageOf, type ReadFile } from "../server/analysis/outline";
+import { extractTypeScript } from "../server/analysis/outline/typescript";
 
 function fakeReadFile(contents: Record<string, string>): ReadFile {
   return async (side, path) => {
@@ -387,5 +388,268 @@ describe("scanDeclarationEnd with parenthesised headers", () => {
     expect(entries[0].newStart).toBe(1);
     expect(entries[0].newEnd).toBe(10);
     expect(entries[0].changedLines).toBe(2);
+  });
+});
+
+describe("extractTypeScript — a brace before the body is not mistaken for it", () => {
+  it("does not end a function at a brace inside an angle-bracketed return type", () => {
+    const content = [
+      "export async function f(): Promise<{ a: string }> {",
+      "  const value = await load();",
+      "  return value;",
+      "}",
+      "",
+      "export function after() {",
+      "  return 1;",
+      "}",
+      "",
+    ].join("\n");
+    const decls = extractTypeScript(content);
+    const f = decls.find((d) => d.name === "f");
+    const after = decls.find((d) => d.name === "after");
+    expect(f?.startLine).toBe(1);
+    expect(f?.endLine).toBe(4);
+    expect(after?.startLine).toBe(6);
+  });
+
+  it("does not end a class at a brace inside a generic constraint, and still extracts its members", () => {
+    const content = [
+      "export class Foo<T extends { id: string }> {",
+      "  bar() {}",
+      "}",
+      "",
+      "export function after() {",
+      "  return 1;",
+      "}",
+      "",
+    ].join("\n");
+    const decls = extractTypeScript(content);
+    const foo = decls.find((d) => d.name === "Foo");
+    const bar = decls.find((d) => d.name === "Foo.bar");
+    const after = decls.find((d) => d.name === "after");
+    expect(foo?.startLine).toBe(1);
+    expect(foo?.endLine).toBe(3);
+    expect(bar).toBeDefined();
+    expect(after?.startLine).toBe(5);
+  });
+
+  it("does not end a function at the brace of a bare object-literal return type", () => {
+    const content = [
+      "function f(): { a: string } {",
+      "  return { a: '1' };",
+      "}",
+      "",
+      "function after() {",
+      "  return 1;",
+      "}",
+      "",
+    ].join("\n");
+    const decls = extractTypeScript(content);
+    const f = decls.find((d) => d.name === "f");
+    const after = decls.find((d) => d.name === "after");
+    expect(f?.startLine).toBe(1);
+    expect(f?.endLine).toBe(3);
+    expect(after?.startLine).toBe(5);
+  });
+});
+
+describe("extractTypeScript — body-less arrow function without a trailing semicolon", () => {
+  it("ends a semicolon-free arrow function declaration on its own line, in a semi:false codebase", () => {
+    const content = ["export const inc = (a: number) => a + 1", "", "export function f() {", "  return 1;", "}", ""].join("\n");
+    const decls = extractTypeScript(content);
+    const inc = decls.find((d) => d.name === "inc");
+    const f = decls.find((d) => d.name === "f");
+    expect(inc?.startLine).toBe(1);
+    expect(inc?.endLine).toBe(1);
+    expect(f?.startLine).toBe(3);
+    expect(f?.endLine).toBe(5);
+  });
+});
+
+describe("computeOutlines — Python module-level statements between declarations", () => {
+  it("does not fold a module-level statement into the preceding function's range", async () => {
+    const file = makeFile({ path: "src/mod.py", status: "added" });
+    const head = `def first():
+    return 1
+
+CONSTANT = 42
+
+def second():
+    return 2
+
+if __name__ == "__main__":
+    main()
+`;
+    const result = await computeOutlines([file], fakeReadFile({ "head:src/mod.py": head }));
+    const entries = result.get("src/mod.py")!;
+    const byName = new Map(entries.map((e) => [e.name, e]));
+    expect(byName.get("first")?.newStart).toBe(1);
+    expect(byName.get("first")?.newEnd).toBe(2);
+    expect(byName.get("second")?.newStart).toBe(6);
+    expect(byName.get("second")?.newEnd).toBe(7);
+  });
+
+  it("reports no entry for a module-level constant edited between two unchanged functions", async () => {
+    const file = makeFile({ path: "src/mod2.py" });
+    const base = `def first():
+    return 1
+
+CONSTANT = 42
+
+def second():
+    return 2
+`;
+    const head = `def first():
+    return 1
+
+CONSTANT = 43
+
+def second():
+    return 2
+`;
+    const result = await computeOutlines([file], fakeReadFile({ "base:src/mod2.py": base, "head:src/mod2.py": head }));
+    expect(result.get("src/mod2.py")).toHaveLength(0);
+  });
+});
+
+describe("computeOutlines — Ruby trailing module-level statement after a class", () => {
+  it("ends the class at its own `end`, excluding a trailing module-level statement", async () => {
+    const file = makeFile({ path: "src/greeter.rb", status: "added" });
+    const head = `class Greeter
+  def hello
+    puts "hi"
+  end
+
+  def bye
+    puts "bye"
+  end
+end
+
+VERSION = "1.0"
+`;
+    const result = await computeOutlines([file], fakeReadFile({ "head:src/greeter.rb": head }));
+    const entries = result.get("src/greeter.rb")!;
+    const byName = new Map(entries.map((e) => [e.name, e]));
+    expect(byName.get("Greeter")?.newStart).toBe(1);
+    expect(byName.get("Greeter")?.newEnd).toBe(9);
+    expect(byName.get("Greeter.hello")?.newStart).toBe(2);
+    expect(byName.get("Greeter.hello")?.newEnd).toBe(4);
+    expect(byName.get("Greeter.bye")?.newStart).toBe(6);
+    expect(byName.get("Greeter.bye")?.newEnd).toBe(8);
+  });
+});
+
+describe("computeOutlines — changedLines counts deletions against the old range", () => {
+  it("counts a deletion inside a function shifted by unrelated insertions above it", async () => {
+    const fillerCount = 100;
+    const filler = Array.from({ length: fillerCount }, (_, idx) => `// filler ${idx + 1}`);
+
+    const base = [
+      "function target() {",
+      "  line1;",
+      "  line2;",
+      "  line3;",
+      "  return 1;",
+      "}",
+      "",
+      "function neighbour() {",
+      "  return 2;",
+      "}",
+      "",
+    ].join("\n");
+
+    const head = [...filler, "function target() {", "  return 1;", "}", "", "function neighbour() {", "  return 2;", "}", ""].join("\n");
+
+    const hunkLines = [
+      ...filler.map((l) => `+${l}`),
+      " function target() {",
+      "-  line1;",
+      "-  line2;",
+      "-  line3;",
+      "   return 1;",
+      " }",
+      " ",
+      " function neighbour() {",
+      "   return 2;",
+      " }",
+    ];
+    const raw = [
+      "diff --git a/src/shift.ts b/src/shift.ts",
+      "index 111..222 100644",
+      "--- a/src/shift.ts",
+      "+++ b/src/shift.ts",
+      `@@ -1,10 +1,${fillerCount + 7} @@`,
+      ...hunkLines,
+      "",
+    ].join("\n");
+
+    const [file] = parseUnifiedDiff(raw);
+    const result = await computeOutlines([file], fakeReadFile({ "base:src/shift.ts": base, "head:src/shift.ts": head }));
+    const entries = result.get("src/shift.ts")!;
+    const target = entries.find((e) => e.name === "target");
+    const neighbour = entries.find((e) => e.name === "neighbour");
+
+    expect(target?.change).toBe("modified");
+    expect(target?.changedLines).toBe(3);
+    expect(neighbour).toBeUndefined(); // unchanged, and the shift/deletion must not leak into it
+  });
+});
+
+describe("computeOutlines — rename matching scales to many declarations", () => {
+  it("pairs up multiple renamed functions across two files", async () => {
+    const fileA = makeFile({ path: "src/a.ts" });
+    const fileB = makeFile({ path: "src/b.ts" });
+    const baseA = `export function alpha(x) {
+  const total = x * 11 + computeAlphaDistinctThing(x);
+  return total;
+}
+
+export function beta(x) {
+  const total = x * 13 + computeBetaDistinctThing(x);
+  return total;
+}
+`;
+    const headA = `export function alphaRenamed(x) {
+  const total = x * 11 + computeAlphaDistinctThing(x);
+  return total;
+}
+
+export function betaRenamed(x) {
+  const total = x * 13 + computeBetaDistinctThing(x);
+  return total;
+}
+`;
+    const baseB = `export function gamma(x) {
+  const total = x * 17 + computeGammaDistinctThing(x);
+  return total;
+}
+`;
+    const headB = `export function gammaRenamed(x) {
+  const total = x * 17 + computeGammaDistinctThing(x);
+  return total;
+}
+`;
+    const result = await computeOutlines(
+      [fileA, fileB],
+      fakeReadFile({
+        "base:src/a.ts": baseA,
+        "head:src/a.ts": headA,
+        "base:src/b.ts": baseB,
+        "head:src/b.ts": headB,
+      }),
+    );
+    const entriesA = result.get("src/a.ts")!;
+    const entriesB = result.get("src/b.ts")!;
+
+    const alphaEntry = entriesA.find((e) => e.name === "alphaRenamed");
+    const betaEntry = entriesA.find((e) => e.name === "betaRenamed");
+    const gammaEntry = entriesB.find((e) => e.name === "gammaRenamed");
+
+    expect(alphaEntry?.change).toBe("renamed");
+    expect(alphaEntry?.counterpart).toEqual({ path: "src/a.ts", name: "alpha" });
+    expect(betaEntry?.change).toBe("renamed");
+    expect(betaEntry?.counterpart).toEqual({ path: "src/a.ts", name: "beta" });
+    expect(gammaEntry?.change).toBe("renamed");
+    expect(gammaEntry?.counterpart).toEqual({ path: "src/b.ts", name: "gamma" });
   });
 });
