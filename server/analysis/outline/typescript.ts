@@ -2,7 +2,7 @@ import type { OutlineKind } from "../../../shared/types";
 import { indentWidth, isBlankLine, scanDeclarationEnd, type ScanOptions } from "./scan";
 import { buildDeclaration, type Declaration } from "./types";
 
-const SCAN_OPTS: ScanOptions = { lineComment: "//", blockComment: ["/*", "*/"], stringChars: ['"', "'", "`"] };
+const SCAN_OPTS: ScanOptions = { lineComment: "//", blockComment: ["/*", "*/"], stringChars: ['"', "'", "`"], regexLiterals: true };
 
 const CONTROL_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "return", "new", "else", "do", "try"]);
 

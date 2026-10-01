@@ -11,6 +11,56 @@ export interface ScanOptions {
   blockComment: [string, string] | null;
   /** Characters that open/close a string literal (escaped by a preceding backslash). */
   stringChars: string[];
+  /** Skip JavaScript-style regex literals (`/…/flags`) so their `//`, quotes and brackets don't confuse the scan. */
+  regexLiterals?: boolean;
+}
+
+/** Characters after which a `/` starts a regex literal rather than a division or a comment. */
+const REGEX_CONTEXT_CHARS = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?"]);
+
+/** Heuristic: a `/` at `ci` begins a regex literal when it follows an operator/opening token
+ * (or `return`/`typeof`/`case`) and isn't a comment opener. A `/` at the start of a line is
+ * treated as a comment, not a regex — `//` lines are overwhelmingly comments. */
+function isRegexStart(line: string, ci: number): boolean {
+  const next = line[ci + 1];
+  if (next === "/" || next === "*" || next === undefined) return false;
+  let i = ci - 1;
+  while (i >= 0 && (line[i] === " " || line[i] === "\t")) i--;
+  if (i < 0) return false;
+  if (REGEX_CONTEXT_CHARS.has(line[i])) return true;
+  const word = /([A-Za-z_$]+)$/.exec(line.slice(0, i + 1))?.[1];
+  return word === "return" || word === "typeof" || word === "case";
+}
+
+/** Returns the index just past a regex literal starting at `start` (its closing `/` and flags),
+ * honouring escapes and character classes; the end of the line when unterminated. */
+function skipRegexLiteral(line: string, start: number): number {
+  let i = start + 1;
+  let inClass = false;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      i++;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      i++;
+      continue;
+    }
+    if (ch === "/") {
+      i++;
+      while (i < line.length && /[a-z]/i.test(line[i])) i++;
+      return i;
+    }
+    i++;
+  }
+  return line.length;
 }
 
 export interface ScanResult {
@@ -96,6 +146,10 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
         }
         if (ch === inString) inString = null;
         ci++;
+        continue;
+      }
+      if (opts.regexLiterals && line[ci] === "/" && isRegexStart(line, ci)) {
+        ci = skipRegexLiteral(line, ci);
         continue;
       }
       if (opts.lineComment && line.startsWith(opts.lineComment, ci)) {

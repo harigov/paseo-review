@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiff, type ParsedFile } from "../server/analysis/diff";
+import { extractDeclarations } from "../server/analysis/outline/index";
 import { computeOutlines, OUTLINE_MAX_BYTES, outlineLanguageOf, type ReadFile } from "../server/analysis/outline";
 import { extractTypeScript } from "../server/analysis/outline/typescript";
 
@@ -651,5 +652,29 @@ export function betaRenamed(x) {
     expect(betaEntry?.counterpart).toEqual({ path: "src/a.ts", name: "beta" });
     expect(gammaEntry?.change).toBe("renamed");
     expect(gammaEntry?.counterpart).toEqual({ path: "src/b.ts", name: "gamma" });
+  });
+});
+
+describe("scanDeclarationEnd with regex literals", () => {
+  it("does not mistake // or quotes inside a regex literal for a comment or string", () => {
+    const content = [
+      "function resolveHref(href: string): string | null {",
+      "  const trimmed = href.trim();",
+      '  if (/^https:\\/\\//i.test(trimmed)) return trimmed;',
+      "  const quoted = /\"[^\"]*\"/.test(trimmed);",
+      '  if (trimmed.startsWith("/")) return `https://github.com${trimmed}`;',
+      "  return quoted ? null : trimmed;",
+      "}",
+      "",
+      "export function after(a: number) {",
+      "  return a + 1;",
+      "}",
+      "",
+    ].join("\n");
+    const decls = extractDeclarations("typescript", content);
+    expect(decls.map((d) => [d.name, d.startLine, d.endLine])).toEqual([
+      ["resolveHref", 1, 7],
+      ["after", 9, 11],
+    ]);
   });
 });
