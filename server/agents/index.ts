@@ -9,11 +9,11 @@ import type { PaseoApi } from "../core/paseo";
 import { waitForPaseo } from "../core/paseo";
 import { services } from "../core/services";
 import type { AgentService } from "../core/services";
-import { agentChoicesRpc, agentTaskRpc, chatStartRpc, precomputeStatusRpc } from "../../shared/rpc";
+import { agentChoicesRpc, agentTaskRpc, ChatStartResultSchema, chatStartRpc, precomputeStatusRpc } from "../../shared/rpc";
 import type { Module, Repo } from "../../shared/types";
 import { listAgentChoices, pickDefaultChoice, readOnlyModeFor } from "./choices";
 import { createPrWorktreeWorkspace, getOrCreateReviewWorkspace } from "./workspace";
-import { startMcpServer, type McpHandle } from "./mcp";
+import { closeMcpServer, closeMcpSession, openMcpSession, type McpSession } from "./mcp";
 import { buildContextPack, chatInstructions } from "./prompts";
 import { extractHtmlBlock, extractJsonBlock, runGenerationAgent, type ExtractResult } from "./runner";
 import { getPrecomputeStatus, startPrecompute } from "./precompute";
@@ -62,22 +62,28 @@ async function findRepoOrThrow(slug: string): Promise<Repo> {
   return repo;
 }
 
-/** Best-effort MCP toolset for one task; callers treat a null return as "no toolset this time". */
-async function withMcp<T>(repo: Repo, number: number, fn: (mcp: McpHandle | null) => Promise<T>): Promise<T> {
-  let mcp: McpHandle | null = null;
+/**
+ * Best-effort MCP toolset for one generation task. The server is the one long-lived process
+ * instance (started lazily, see mcp.ts); only this task's *session token* is scoped here, and
+ * it's revoked once the task's turn is fully done — safe, because `runGenerationAgent` blocks
+ * on `waitForFinish` (plus retries) before this `finally` runs. Callers treat a null return as
+ * "no toolset this time" and omit `mcpServers`/`toolPolicy` from the agent config.
+ */
+async function withTaskMcp<T>(repo: Repo, number: number, fn: (mcp: McpSession | null) => Promise<T>): Promise<T> {
+  let mcp: McpSession | null = null;
   try {
-    mcp = await startMcpServer(repo, number);
+    mcp = await openMcpSession("task", repo, number);
   } catch (error) {
-    console.error(`[pr-review] MCP server failed to start for ${repo.slug}#${number}:`, error);
+    console.error(`[pr-review] MCP session failed to open for ${repo.slug}#${number}:`, error);
   }
   try {
     return await fn(mcp);
   } finally {
-    if (mcp) await mcp.close().catch(() => undefined);
+    if (mcp) closeMcpSession(mcp.token);
   }
 }
 
-function mcpAgentFields(mcp: McpHandle | null): {
+function mcpAgentFields(mcp: McpSession | null): {
   mcpServers?: Record<string, { type: "http"; url: string; headers?: Record<string, string> }>;
   toolPolicy?: { preapproved: Array<{ kind: "mcp"; server: string; tool: string }> };
 } {
@@ -99,7 +105,7 @@ async function runTask(input: {
   const repo = await findRepoOrThrow(input.repo);
   const choice = await pickDefaultChoice(paseo, input.task, input.agentChoiceId);
   if (!choice) throw new Error("No agent provider is available. Configure one in Paseo settings.");
-  const modeId = choice.modeId ?? readOnlyModeFor(choice.provider) ?? undefined;
+  const modeId = choice.modeId ?? (await readOnlyModeFor(paseo, choice.provider)) ?? undefined;
 
   const [pr, analysis] = await Promise.all([
     services.github.getPr(input.repo, input.number),
@@ -107,13 +113,17 @@ async function runTask(input: {
   ]);
   const contextPack = await buildContextPack(repo, input.number, pr, analysis);
 
-  // "describe" runs in the user's own workspace (their checkout); everything else runs in the
-  // shared per-project "PR Review" workspace.
-  const workspaceId = input.task === "describe" ? null : await getOrCreateReviewWorkspace(paseo, repo);
+  // Every generation task, including "describe", runs in the shared per-project "PR Review"
+  // workspace — never a bare `cwd` agent create, which silently makes the daemon provision a
+  // brand-new, never-archived workspace on every single run (sidebar-hygiene leak, plan §9.1).
+  const workspaceId = await getOrCreateReviewWorkspace(paseo, repo);
+  if (!workspaceId) {
+    throw new Error(`Could not open the shared "PR Review" workspace for ${repo.slug}. Check daemon logs and try again.`);
+  }
   const labels = { "pr-review.kind": input.task, "pr-review.pr": `${input.repo}#${input.number}` };
   const title = `PR Review · ${input.task} · ${repo.slug}#${input.number}`;
 
-  return withMcp(repo, input.number, async (mcp) => {
+  return withTaskMcp(repo, input.number, async (mcp) => {
     const common = {
       workspaceId,
       cwd: repo.rootPath,
@@ -199,42 +209,80 @@ function writeChats(map: Record<string, ChatEntry>): void {
   }
 }
 
+// Serializes `startChat` per repo#number so two concurrent `prr.chat.start` calls for the same
+// PR can't both pass the "nothing active yet" check before either writes `chats.json` — which
+// used to create two worktree workspaces + agents, orphaning one untracked.
+const chatLocks = new Map<string, Promise<unknown>>();
+function withChatLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = chatLocks.get(key) ?? Promise.resolve();
+  const next = prior.then(fn, fn);
+  chatLocks.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
 async function startChat(
   paseo: PaseoApi,
   input: { repo: string; number: number; seed?: string; agentChoiceId?: string },
 ): Promise<{ agentId: string; workspaceId: string | null; reused: boolean }> {
   const key = `${input.repo}#${input.number}`;
-  const chats = readChats();
-  const existing = chats[key];
-  if (existing) {
-    try {
-      const snapshot = await paseo.agents.ref(existing.agentId).refresh();
-      if (snapshot && !snapshot.agent.archivedAt) {
-        if (input.seed) await paseo.agents.ref(existing.agentId).send(input.seed).catch(() => undefined);
-        return { agentId: existing.agentId, workspaceId: existing.workspaceId, reused: true };
+  return withChatLock(key, async () => {
+    const chats = readChats();
+    const existing = chats[key];
+    if (existing) {
+      try {
+        const snapshot = await paseo.agents.ref(existing.agentId).refresh();
+        if (snapshot && !snapshot.agent.archivedAt) {
+          if (input.seed) {
+            if (snapshot.agent.activeTurn) {
+              console.error(
+                `[pr-review] chat ${key} has a turn in progress; skipping the seed message rather than interrupting it`,
+              );
+            } else {
+              // No `.catch()` here: a failed send must fail this RPC's job, not silently report
+              // `reused: true` for a message that was never delivered.
+              await paseo.agents.ref(existing.agentId).send(input.seed);
+            }
+          }
+          return { agentId: existing.agentId, workspaceId: existing.workspaceId, reused: true };
+        }
+      } catch {
+        // Agent no longer resolves; fall through and create a fresh one.
       }
-    } catch {
-      // Agent no longer resolves; fall through and create a fresh one.
     }
-  }
 
-  const repo = await findRepoOrThrow(input.repo);
-  const [pr, analysis] = await Promise.all([
-    services.github.getPr(input.repo, input.number),
-    services.analysis.getAnalysis(input.repo, input.number),
-  ]);
-  const refs = await services.analysis.ensurePrRefs(input.repo, input.number).catch(() => null);
-  const contextPack = await buildContextPack(repo, input.number, pr, analysis);
-  const instructions = chatInstructions(repo, input.number, refs?.mergeBaseSha ?? pr.baseSha);
-  const systemPrompt = `${contextPack}\n\n## Instructions\n${instructions}`;
+    const repo = await findRepoOrThrow(input.repo);
+    const [pr, analysis] = await Promise.all([
+      services.github.getPr(input.repo, input.number),
+      services.analysis.getAnalysis(input.repo, input.number),
+    ]);
+    const refs = await services.analysis.ensurePrRefs(input.repo, input.number).catch(() => null);
+    const contextPack = await buildContextPack(repo, input.number, pr, analysis);
+    const instructions = chatInstructions(repo, input.number, refs?.mergeBaseSha ?? pr.baseSha);
+    const systemPrompt = `${contextPack}\n\n## Instructions\n${instructions}`;
 
-  const choice = await pickDefaultChoice(paseo, "chat", input.agentChoiceId);
-  const modeId = choice ? choice.modeId ?? readOnlyModeFor(choice.provider) ?? undefined : undefined;
+    const choice = await pickDefaultChoice(paseo, "chat", input.agentChoiceId);
+    const modeId = choice ? choice.modeId ?? (await readOnlyModeFor(paseo, choice.provider)) ?? undefined : undefined;
 
-  let workspaceId = await createPrWorktreeWorkspace(paseo, repo, input.number, pr.summary.title);
-  if (!workspaceId) workspaceId = await getOrCreateReviewWorkspace(paseo, repo);
+    // No fallback to the shared "PR Review" workspace: that workspace is the user's own
+    // checkout on whatever branch is currently active, not this PR's branch. Reviewing there
+    // would silently discuss the wrong code. Fail loudly instead.
+    const workspaceId = await createPrWorktreeWorkspace(paseo, repo, input.number, pr.summary.title);
+    if (!workspaceId) {
+      throw new Error(
+        `Could not create the PR worktree workspace for ${repo.slug}#${input.number}. Check daemon logs and try again.`,
+      );
+    }
 
-  return withMcp(repo, input.number, async (mcp) => {
+    // Chat sessions are opened on the one long-lived MCP server and intentionally never closed
+    // here — they persist per repo#number for the life of the plugin process so the live,
+    // multi-turn conversation keeps tool access instead of losing it moments after creation.
+    const mcp = await openMcpSession("chat", repo, input.number);
     const config = {
       provider: choice?.provider ?? "claude/claude-sonnet-5",
       ...(modeId ? { modeId } : {}),
@@ -246,14 +294,11 @@ async function startChat(
     const labels = { "pr-review.kind": "chat", "pr-review.pr": key };
     const title = `PR #${input.number} · ${pr.summary.title}`.slice(0, 120);
 
-    const agent = workspaceId
-      ? await paseo.workspaces.ref(workspaceId).agents.create({ config, title, labels, prompt })
-      : await paseo.agents.create({ config, cwd: repo.rootPath, title, labels, prompt });
+    const agent = await paseo.workspaces.ref(workspaceId).agents.create({ config, title, labels, prompt });
 
-    const resolvedWorkspaceId = workspaceId ?? agent.workspaceId ?? null;
-    chats[key] = { agentId: agent.id, workspaceId: resolvedWorkspaceId };
+    chats[key] = { agentId: agent.id, workspaceId };
     writeChats(chats);
-    return { agentId: agent.id, workspaceId: resolvedWorkspaceId, reused: false };
+    return { agentId: agent.id, workspaceId, reused: false };
   });
 }
 
@@ -279,16 +324,33 @@ export function registerAgentHandlers(server: PluginServerContext): void {
     return { jobId };
   });
 
-  handle(server, chatStartRpc, async (input, context) => startChat(context.paseo, input));
+  handle(server, chatStartRpc, async (input, context) => {
+    // Creating the PR worktree (and the first turn) can exceed the daemon's 30 s plugin-RPC
+    // cap, so this goes through the job system like every other long operation. The dedupe key
+    // also means a client that calls `prr.chat.start` twice in a row for the same PR before the
+    // first job finishes joins that job instead of racing a second worktree/agent creation.
+    const jobId = startJob(
+      "chat",
+      async () => {
+        const result = await startChat(context.paseo, input);
+        return ChatStartResultSchema.parse(result);
+      },
+      `chat:${input.repo}#${input.number}`,
+    );
+    return { jobId };
+  });
 
   handle(server, precomputeStatusRpc, async () => getPrecomputeStatus());
 }
 
-/** Starts the precompute scheduler (first run 60s after start). The MCP toolset is started
- * lazily, per task/chat, by `withMcp`, so there is nothing further to start here. */
+/** Starts the precompute scheduler (first run 60s after start) and lets the MCP server start
+ * lazily on first use. The returned stop function awaits any precompute tick already in flight
+ * and then closes the MCP server, so no in-flight precompute run or live chat/task session is
+ * left pointing at a server that just disappeared mid-shutdown. */
 export function startBackground(): () => Promise<void> {
   const stopPrecompute = startPrecompute();
   return async () => {
-    stopPrecompute();
+    await stopPrecompute();
+    await closeMcpServer();
   };
 }

@@ -34,8 +34,27 @@ export interface RepoOverride {
   rules: RepoRule[];
 }
 
-/** Translates a limited glob syntax (`**`, `*`, `?`) into an anchored RegExp. */
+// A1: bound glob patterns before compiling them to a regex. Repo rules (.paseo/review.yml)
+// and .gitattributes are read from the PR's own head commit, so both the pattern AND the
+// file paths it's tested against are attacker-controlled. Translating many adjacent `*`/`?`
+// wildcards into a regex (`[^/]*` etc.) is classically vulnerable to catastrophic
+// backtracking: a 30-wildcard pattern tested against a ~40 char non-matching path took
+// 18+ seconds in a local repro. Reject oversized/over-wildcarded patterns instead of
+// compiling them.
+const MAX_GLOB_LENGTH = 200;
+const MAX_GLOB_WILDCARDS = 15;
+
+export class UnsafeGlobError extends Error {}
+
+/** Translates a limited glob syntax (`**`, `*`, `?`) into an anchored RegExp. Throws `UnsafeGlobError` for patterns too large/wildcard-heavy to safely compile. */
 export function globToRegExp(glob: string): RegExp {
+  if (glob.length > MAX_GLOB_LENGTH) {
+    throw new UnsafeGlobError(`glob too long (${glob.length} > ${MAX_GLOB_LENGTH} chars): ${glob.slice(0, 60)}…`);
+  }
+  const wildcards = (glob.match(/[*?]/g) ?? []).length;
+  if (wildcards > MAX_GLOB_WILDCARDS) {
+    throw new UnsafeGlobError(`glob has too many wildcards (${wildcards} > ${MAX_GLOB_WILDCARDS}): ${glob.slice(0, 60)}…`);
+  }
   let out = "";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
@@ -53,6 +72,22 @@ export function globToRegExp(glob: string): RegExp {
     }
   }
   return new RegExp(`^${out}$`);
+}
+
+/** Memoized, failure-tolerant wrapper: compiles a glob once, logs and skips unsafe patterns. */
+const compiledGlobCache = new Map<string, RegExp | null>();
+function safeGlobToRegExp(glob: string): RegExp | null {
+  const cached = compiledGlobCache.get(glob);
+  if (cached !== undefined) return cached;
+  try {
+    const re = globToRegExp(glob);
+    compiledGlobCache.set(glob, re);
+    return re;
+  } catch (error) {
+    console.error(`[pr-review] rejected unsafe glob pattern: ${error instanceof Error ? error.message : String(error)}`);
+    compiledGlobCache.set(glob, null);
+    return null;
+  }
 }
 
 export async function loadRepoOverride(mirror: string, headSha: string): Promise<RepoOverride> {
@@ -132,7 +167,8 @@ export function parseGitAttributes(raw: string): GitAttributesRule[] {
     const generated = attrs.includes("linguist-generated") || attrs.includes("linguist-generated=true");
     const vendored = attrs.includes("linguist-vendored") || attrs.includes("linguist-vendored=true");
     if (!generated && !vendored) continue;
-    rules.push({ regex: globToRegExp(pattern.startsWith("/") ? pattern.slice(1) : `**/${pattern}`), generated, vendored });
+    const regex = safeGlobToRegExp(pattern.startsWith("/") ? pattern.slice(1) : `**/${pattern}`);
+    if (regex) rules.push({ regex, generated, vendored });
   }
   return rules;
 }
@@ -181,7 +217,9 @@ export function classifyHeuristic(
 ): HeuristicResult {
   const knownIds = new Set(taxonomy.map((m) => m.id));
   for (const rule of rules) {
-    if (knownIds.has(rule.module) && globToRegExp(rule.glob).test(filePath)) {
+    if (!knownIds.has(rule.module)) continue;
+    const regex = safeGlobToRegExp(rule.glob);
+    if (regex && regex.test(filePath)) {
       return { moduleId: rule.module, source: "rule", confidence: 1, noiseReason: null };
     }
   }

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { FlatList, Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -28,36 +28,43 @@ type Row =
 const LINE_HEIGHT = 21;
 const code = { fontFamily: "monospace", fontSize: 12, lineHeight: LINE_HEIGHT } as const;
 
-function luminance(hex: string): number {
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) return 0;
-  const r = Number.parseInt(hex.slice(1, 3), 16);
-  const g = Number.parseInt(hex.slice(3, 5), 16);
-  const b = Number.parseInt(hex.slice(5, 7), 16);
+/** Parses `#rgb`/`#rrggbb`; returns null (rather than guessing) when the format is unknown. */
+function luminance(hex: string): number | null {
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return null;
+  const full = match[1].length === 3 ? match[1].split("").map((ch) => ch + ch).join("") : match[1];
+  const r = Number.parseInt(full.slice(0, 2), 16);
+  const g = Number.parseInt(full.slice(2, 4), 16);
+  const b = Number.parseInt(full.slice(4, 6), 16);
   return r * 0.2126 + g * 0.7152 + b * 0.0722;
 }
 
-/** Highlights one hunk's old- and new-side text in as few highlightCode calls as possible. */
+/**
+ * Highlights one hunk's old- and new-side text in as few highlightCode calls as possible.
+ * Context lines belong to *both* reconstructions (they're identical in the old and new file),
+ * so both the old (context+deletions) and new (context+additions) sequences are highlighted in
+ * hunk order, and the new-side result wins for lines that appear on both sides — that keeps
+ * multi-line tokens (block comments, template literals, JSX) correctly continued across a
+ * context/addition boundary instead of losing their preceding context.
+ */
 function highlightHunk(hunk: Hunk, path: string): HighlightToken[][] {
   const result: HighlightToken[][] = hunk.lines.map(() => []);
-  let oldIndices: number[] = [];
-  let newIndices: number[] = [];
-  function flush() {
-    [oldIndices, newIndices].forEach((indices) => {
-      if (indices.length === 0) return;
-      const text = indices.map((index) => hunk.lines[index].text).join("\n");
-      const tokens = highlightCode(text, path);
-      indices.forEach((index, offset) => {
-        result[index] = tokens[offset] ?? [];
-      });
+  function highlightGroup(indices: number[]) {
+    if (indices.length === 0) return;
+    const text = indices.map((index) => hunk.lines[index].text).join("\n");
+    const tokens = highlightCode(text, path);
+    indices.forEach((index, offset) => {
+      result[index] = tokens[offset] ?? [];
     });
-    oldIndices = [];
-    newIndices = [];
   }
+  const oldIndices: number[] = [];
+  const newIndices: number[] = [];
   hunk.lines.forEach((line, index) => {
     if (line.oldNo !== null) oldIndices.push(index);
-    else if (line.newNo !== null) newIndices.push(index);
+    if (line.newNo !== null) newIndices.push(index);
   });
-  flush();
+  highlightGroup(oldIndices);
+  highlightGroup(newIndices);
   return result;
 }
 
@@ -97,6 +104,7 @@ export function FileDiffView({
   repo,
   number,
   path,
+  headSha,
   scope,
   theme,
   layout,
@@ -107,6 +115,8 @@ export function FileDiffView({
   repo: string;
   number: number;
   path: string;
+  /** Current PR head; stamps any draft comment added here so it can be dropped if the head changes. */
+  headSha: string;
   scope: "full" | "since_viewed" | "since_last_review";
   theme: PluginSurfaceProps["theme"];
   layout: PluginSurfaceProps["layout"];
@@ -126,12 +136,24 @@ export function FileDiffView({
   const [composer, setComposer] = useState<{ side: Side; line: number } | null>(null);
   const [composerBody, setComposerBody] = useState("");
 
-  const dark = luminance(c.surface0) < 128;
+  // Fail open to "light" when the theme doesn't hand back a parseable hex color, rather than
+  // silently forcing the dark palette (PluginTheme.colors is typed as plain `string`, with no
+  // guaranteed format).
+  const surfaceLuminance = luminance(c.surface0);
+  const dark = surfaceLuminance !== null && surfaceLuminance < 128;
   const palette = useMemo(() => resolveSyntaxColors("github", dark ? "dark" : "light"), [dark]);
 
+  // Only highlight hunks that are actually visible: lines inside a collapsed moved/whitespace
+  // hunk aren't rendered at all until expanded, so there's no reason to pay for tokenizing them
+  // up front — especially on a large file, where that eager work can jank the main thread.
   const hunkTokens = useMemo(
-    () => diff?.hunks.map((hunk) => highlightHunk(hunk, path)) ?? [],
-    [diff, path],
+    () =>
+      diff?.hunks.map((hunk, hunkIndex) => {
+        const collapsible = hunk.pureMove || hunk.whitespaceOnly;
+        if (collapsible && !expandedHunks.has(hunkIndex)) return [];
+        return highlightHunk(hunk, path);
+      }) ?? [],
+    [diff, path, expandedHunks],
   );
 
   const rows = useMemo<Row[]>(() => {
@@ -167,20 +189,14 @@ export function FileDiffView({
     return result;
   }, [diff, expandedHunks, threads, findings]);
 
-  const { heights, offsets } = useMemo(() => {
-    const heightList = rows.map(rowHeight);
-    const offsetList: number[] = [];
-    let running = 0;
-    heightList.forEach((height) => {
-      offsetList.push(running);
-      running += height;
-    });
-    return { heights: heightList, offsets: offsetList };
-  }, [rows]);
-
-  const getItemLayout = useCallback(
-    (_data: ArrayLike<Row> | null | undefined, index: number) => ({ length: heights[index], offset: offsets[index], index }),
-    [heights, offsets],
+  // Several row kinds (thread, and hunkHeader/finding on a narrow layout) have genuinely
+  // variable height — real comment text wraps, long titles wrap — so `getItemLayout` isn't
+  // used: it would tell FlatList to trust a fixed estimate, and any row after a mis-estimated
+  // one ends up overlapping or clipped. This is just a rough cap for the scroll window's size;
+  // it no longer needs to be exact, so it's fine as a single memoized pass over `rows`.
+  const estimatedHeight = useMemo(
+    () => Math.min(600, rows.reduce((sum, row) => sum + rowHeight(row), 0) || LINE_HEIGHT),
+    [rows],
   );
 
   function openComposer(side: Side, lineNumber: number) {
@@ -191,7 +207,7 @@ export function FileDiffView({
   function submitComposer() {
     if (!composer || !composerBody.trim()) return;
     const draft: DraftComment = { path, line: composer.line, side: composer.side, body: composerBody.trim() };
-    addDraft(repo, number, draft);
+    addDraft(repo, number, headSha, draft);
     onComment?.(draft);
     toast.show("Draft comment added");
     setComposer(null);
@@ -297,18 +313,15 @@ export function FileDiffView({
   if (error || !diff) return <Text style={{ color: c.statusDanger, padding: 12 }}>Failed to load diff.</Text>;
   if (diff.binary) return <Text style={{ color: c.foregroundMuted, padding: 12 }}>Binary file not shown.</Text>;
 
-  const height = Math.min(600, rows.reduce((sum, row) => sum + rowHeight(row), 0) || LINE_HEIGHT);
-
   return (
     <View style={{ borderWidth: 1, borderColor: c.border, borderRadius: 5, overflow: "hidden" }}>
       <FlatList
         data={rows}
         keyExtractor={(row, index) => `${row.type}-${index}`}
         renderItem={renderItem}
-        getItemLayout={getItemLayout}
         initialNumToRender={60}
         windowSize={10}
-        style={{ height, backgroundColor: c.surface0 }}
+        style={{ height: estimatedHeight, backgroundColor: c.surface0 }}
       />
       <Modal title={composer ? `Comment on ${path}:${composer.line}` : "Comment"} open={composer !== null} onOpenChange={(open) => !open && setComposer(null)}>
         <Modal.Content>

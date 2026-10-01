@@ -15,7 +15,7 @@ export function handle<I extends ZodType, O extends ZodType>(
   server.handle(contract, async (input, context) => {
     rememberPaseo(context.paseo);
     try {
-      return (await fn(input as RpcInput<PluginRpcContract<I, O>>, context)) as never;
+      return await fn(input, context);
     } catch (error) {
       console.error(`[pr-review] ${contract.name} failed:`, error);
       throw error;

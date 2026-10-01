@@ -7,24 +7,23 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 // Ported from the MIT Ironside Software pull-requests-paseo-plugin (client/markdown.tsx),
 // adapted to this plugin's theme tokens and link-safety helper.
 
+// React Native's URL polyfill doesn't implement protocol/username/password, so links are
+// checked with string rules instead of `new URL`. Only https links without credentials open;
+// root-relative and relative links resolve against the PR's GitHub URL.
 function safeLink(href: string, baseUrl: string): string | null {
-  try {
-    const url = new URL(href, baseUrl);
-    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
-  } catch {
-    return null;
+  const trimmed = href.trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith("//")) {
+    const absolute = trimmed.startsWith("//") ? `https:${trimmed}` : trimmed;
+    const match = /^https:\/\/([^/?#]*)/i.exec(absolute);
+    if (!match || match[1]!.includes("@") || !match[1]) return null;
+    return absolute;
   }
-}
-
-/** Strips a `<!-- paseo:html --> ... <!-- /paseo:html -->` block before rendering as markdown. */
-export function stripRichHtmlBlock(body: string): string {
-  return body.replace(/<!--\s*paseo:html\s*-->[\s\S]*?<!--\s*\/paseo:html\s*-->/, "").trim();
-}
-
-/** Extracts the HTML payload of a `<!-- paseo:html -->...<!-- /paseo:html -->` block, if present. */
-export function extractRichHtmlBlock(body: string): string | null {
-  const match = /<!--\s*paseo:html\s*-->([\s\S]*?)<!--\s*\/paseo:html\s*-->/.exec(body);
-  return match ? match[1].trim() : null;
+  const base = /^(https:\/\/[^/?#@]+)(\/[^?#]*)?/i.exec(baseUrl);
+  if (!base) return null;
+  if (trimmed.startsWith("/")) return `${base[1]}${trimmed}`;
+  if (trimmed.startsWith("#") || trimmed.startsWith("?")) return `${base[1]}${base[2] ?? ""}${trimmed}`;
+  const dir = (base[2] ?? "/").replace(/[^/]*$/, "");
+  return `${base[1]}${dir}${trimmed}`;
 }
 
 export function Markdown({ body, theme, baseUrl }: { body: string; theme: PluginSurfaceProps["theme"]; baseUrl: string }) {
@@ -169,5 +168,11 @@ export function Markdown({ body, theme, baseUrl }: { body: string; theme: Plugin
     });
   }
 
-  return <View style={{ gap: 10 }}>{blocks(tokens)}</View>;
+  // `blocks`/`inline` are cheap closures, but walking a large token tree into React elements
+  // is not: memoize the walk itself so an unrelated parent re-render (e.g. a toast, or toggling
+  // "show markdown") doesn't re-walk a very long PR body every time.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const content = useMemo(() => blocks(tokens), [tokens, c, baseUrl]);
+
+  return <View style={{ gap: 10 }}>{content}</View>;
 }

@@ -72,6 +72,15 @@ export interface AnalysisService {
   buildLocalUnits(cwd: string, baseRef?: string): Promise<ValidationUnit[]>;
   /** Record a user module override. */
   moveFile(repo: string, number: number, path: string, moduleId: string): Promise<void>;
+  /**
+   * Inbox enrichment from the cached analysis for exactly this head (null when none):
+   * severity/changeType from the decision model and the count of files changed since the viewer's last review.
+   */
+  getInboxEnrichment(repo: string, number: number, headSha: string): Promise<{
+    severity: number | null;
+    changeType: string | null;
+    changedSinceMyReview: number | null;
+  } | null>;
   /** Called by other areas to attach artifacts to the cached analysis (summary, visual HTML). */
   patchAnalysis(repo: string, number: number, patch: Partial<Pick<Analysis, "summary" | "visualOverviewHtml" | "modules">>): Promise<void>;
 }
@@ -144,6 +153,12 @@ export interface ValidatorService {
   }>;
   parseValidator(markdown: string, source: Validator["source"], path: string): Validator;
   evaluate(input: { validators: Validator[]; units: ValidationUnit[]; repo: string; number?: number }): Promise<ValidatorResult[]>;
+  /**
+   * Re-apply the current enabled/dismissed state to cached results without re-evaluating:
+   * drops disabled validators, flags dismissed findings, and recomputes each status so a
+   * validator whose failing findings are all dismissed no longer reads as "fail".
+   */
+  applyState(repo: string, number: number, results: ValidatorResult[]): ValidatorResult[];
   setEnabled(repo: string, validatorId: string, enabled: boolean): Promise<void>;
   dismiss(repo: string, number: number, validatorId: string, unitKey: string): Promise<void>;
   save(repo: string, target: "repo" | "personal", fileName: string, markdown: string): Promise<void>;

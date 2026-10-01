@@ -1,6 +1,7 @@
 import type { JobUpdate } from "../core/jobs";
 import { services } from "../core/services";
-import type { Analysis, AnalyzedFile, Module } from "../../shared/types";
+import type { Analysis, AnalyzedFile, Module, ThreadTriage } from "../../shared/types";
+import { extractRichHtml } from "../../shared/rich-html";
 import { annotateMovesAndWhitespace, parseUnifiedDiff, type ParsedFile } from "./diff";
 import { ensureMirror, fetchPrRefs, mergeBase as computeMergeBase, rawDiff, showFile } from "./git";
 import { classifyHeuristic, DEFAULT_MODULES, loadRepoOverride, parseGitAttributes, resolveTaxonomy, type HeuristicResult, type ModuleDef } from "./modules";
@@ -25,30 +26,43 @@ function hunkToText(hunk: ParsedFile["hunks"][number]): string {
   return lines.join("\n").slice(0, 2000);
 }
 
+/** X4: a ±20-line window of `path` at `ref` around `centerLine`, for thread-triage context. */
+async function threadContextWindow(mirror: string, ref: string, path: string, centerLine: number | null): Promise<string> {
+  if (centerLine === null) return "";
+  const content = await showFile(mirror, ref, path);
+  if (!content) return "";
+  const lines = content.split("\n");
+  const start = Math.max(0, centerLine - 20 - 1);
+  const end = Math.min(lines.length, centerLine + 20);
+  return lines.slice(start, end).join("\n").slice(0, 3000);
+}
+
 export async function runAnalysisPipeline(repoSlug: string, number: number, force: boolean, update: JobUpdate): Promise<Analysis> {
   update.stage("fetch", 0.02);
   const repo = await resolveRepo(repoSlug);
-  const detail = await services.github.getPr(repoSlug, number, force);
+  // A10: always fetch a fresh PR head for the short-circuit check below, regardless of
+  // `force` (which only means "recompute even if the head hasn't changed"). Reusing `force`
+  // as the GitHub refresh flag let the pipeline decide "nothing changed" off of GitHub's own
+  // up-to-20s-stale cache, serving a stale analysis right after a push.
+  const detail = await services.github.getPr(repoSlug, number, true);
   const headSha = detail.summary.headSha;
   const baseSha = detail.baseSha;
   const baseRef = detail.summary.baseRef;
 
-  const existing = loadAnalysis(repo.owner, repo.name, number);
+  const existing = loadAnalysis(repo.slug, number);
   if (!force && existing && existing.headSha === headSha) return existing;
 
   const mirror = await ensureMirror(repo);
   await fetchPrRefs(mirror, number, baseRef);
   const mergeBaseSha = await computeMergeBase(mirror, baseSha, headSha, baseRef);
 
+  // A7: let a diff-stage failure end the job in error instead of silently saving an empty
+  // analysis. `rawDiff` now throws on a non-zero exit or on buffer truncation (previously it
+  // always returned `result.stdout`, so any git failure looked exactly like "no changes").
   update.stage("diff", 0.15);
-  let parsedFiles: ParsedFile[] = [];
-  try {
-    const raw = await rawDiff(mirror, mergeBaseSha, headSha);
-    parsedFiles = parseUnifiedDiff(raw);
-    annotateMovesAndWhitespace(parsedFiles);
-  } catch (error) {
-    console.error("[pr-review] diff stage failed:", error);
-  }
+  const raw = await rawDiff(mirror, mergeBaseSha, headSha);
+  const parsedFiles: ParsedFile[] = parseUnifiedDiff(raw);
+  annotateMovesAndWhitespace(parsedFiles);
 
   update.stage("modules", 0.3);
   let taxonomy: ModuleDef[] = DEFAULT_MODULES;
@@ -137,9 +151,35 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
     }
   }
 
+  // X4: thread triage — only for unresolved threads, run in its own try/catch so a failure
+  // here doesn't blow away severity/changeType/module results that already succeeded.
+  const threadTriage: Record<string, { triage: ThreadTriage; probability: number }> = {};
+  if (decisionsEnabled && decisionsConfigured) {
+    try {
+      const unresolved = detail.threads.filter((t) => !t.isResolved);
+      if (unresolved.length > 0) {
+        const inputs = await Promise.all(
+          unresolved.map(async (t) => {
+            const comment = t.comments[t.comments.length - 1]?.body ?? t.comments[0]?.body ?? "";
+            const originalHunk = await threadContextWindow(mirror, mergeBaseSha, t.path, t.originalLine ?? t.line);
+            const currentHunk = await threadContextWindow(mirror, headSha, t.path, t.line ?? t.originalLine);
+            return { threadId: t.id, comment: comment.slice(0, 3000), originalHunk, currentHunk };
+          }),
+        );
+        const triaged = await services.decide.triageThreads(inputs);
+        for (const r of triaged) {
+          if (r.triage !== null && r.probability !== null) threadTriage[r.threadId] = { triage: r.triage, probability: r.probability };
+        }
+      }
+    } catch (error) {
+      decisionError = decisionError ?? (error instanceof Error ? error.message : String(error));
+      console.error("[pr-review] thread triage failed:", error);
+    }
+  }
+
   // User overrides applied last.
   try {
-    const overrides = loadOverrides(repo.owner, repo.name, number);
+    const overrides = loadOverrides(repo.slug, number);
     for (const [path, moduleId] of Object.entries(overrides)) {
       const assignment = assignments.get(path);
       if (!assignment) continue;
@@ -251,9 +291,7 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
   });
 
   update.stage("assemble", 0.95);
-  let richDescriptionHtml: string | null = null;
-  const bodyMatch = /<!--\s*paseo:html\s*-->([\s\S]*?)<!--\s*\/paseo:html\s*-->/.exec(detail.body);
-  if (bodyMatch) richDescriptionHtml = bodyMatch[1].trim();
+  const richDescriptionHtml = extractRichHtml(detail.body);
 
   const guidanceFiles: string[] = [];
   for (const name of ["REVIEW.md", "AGENTS.md", "CLAUDE.md"]) {
@@ -292,8 +330,9 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
     richDescriptionHtml,
     visualOverviewHtml: existing && existing.headSha === headSha ? existing.visualOverviewHtml : null,
     guidanceFiles,
+    threadTriage,
   };
 
-  saveAnalysis(repo.owner, repo.name, number, analysis);
+  saveAnalysis(repo.slug, number, analysis);
   return analysis;
 }

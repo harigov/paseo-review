@@ -31,12 +31,15 @@ export function parseGithubSlug(remoteUrl: string): { owner: string; name: strin
       pathPart = scpMatch[2];
     }
   }
-  if (!host || !pathPart || !GITHUB_HOST_RE.test(host)) return null;
+  if (!host || !pathPart) return null;
+  // Strip an explicit port (e.g. "ssh://git@github.com:22/owner/repo.git") before the host check.
+  const hostNoPort = host.replace(/:\d+$/, "");
+  if (!GITHUB_HOST_RE.test(hostNoPort)) return null;
 
   const cleanPath = pathPart.replace(/^\/+/, "").replace(/\.git\/?$/i, "");
   const segments = cleanPath.split("/").filter(Boolean);
-  if (segments.length < 2) return null;
-  const [owner, name] = segments.slice(-2);
+  if (segments.length !== 2) return null;
+  const [owner, name] = segments;
   return { owner, name };
 }
 

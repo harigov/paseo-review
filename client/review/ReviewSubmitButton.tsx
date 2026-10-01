@@ -4,7 +4,7 @@ import { Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-
 import { useRpc } from "@getpaseo/plugin/client";
 import { reviewSubmitRpc } from "../../shared/rpc";
 import type { PrTabContext } from "../pr/tab-props";
-import { clearDrafts, removeDraft, useDrafts } from "./drafts";
+import { clearDrafts, dropStaleDrafts, removeDraft, useDrafts } from "./drafts";
 
 const EVENTS = [
   { event: "APPROVE" as const, label: "Approve" },
@@ -13,9 +13,10 @@ const EVENTS = [
 ];
 
 export function ReviewSubmitButton(props: PrTabContext) {
-  const { repo, number, theme, refresh } = props;
+  const { repo, number, theme, refresh, reanalyze, analysis } = props;
   const c = theme.colors;
-  const drafts = useDrafts(repo, number);
+  const headSha = analysis?.headSha ?? "";
+  const drafts = useDrafts(repo, number, headSha);
   const rpc = useRpc(reviewSubmitRpc);
   const toast = useToast();
   const [open, setOpen] = useState(false);
@@ -33,10 +34,13 @@ export function ReviewSubmitButton(props: PrTabContext) {
         comments: drafts.map((draft) => ({ path: draft.path, line: draft.line, side: draft.side, body: draft.body })),
       });
       toast.show("Review submitted");
-      clearDrafts(repo, number);
+      clearDrafts(repo, number, headSha);
       setBody("");
       setOpen(false);
       refresh();
+      // The review just moved the "since my last review" anchor; force a fresh analysis run
+      // rather than waiting for the next natural re-analysis.
+      reanalyze();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to submit review");
     } finally {
@@ -44,11 +48,21 @@ export function ReviewSubmitButton(props: PrTabContext) {
     }
   }
 
+  function openReviewModal() {
+    if (headSha) {
+      const discarded = dropStaleDrafts(repo, number, headSha);
+      if (discarded > 0) {
+        toast.show(`Discarded ${discarded} draft comment${discarded === 1 ? "" : "s"} written before the latest push.`, { variant: "warning" });
+      }
+    }
+    setOpen(true);
+  }
+
   return (
     <>
       <Pressable
         accessibilityRole="button"
-        onPress={() => setOpen(true)}
+        onPress={openReviewModal}
         style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: c.accent, borderRadius: 6 }}
       >
         <Icon name="GitPullRequest" size={13} color={c.accentForeground} />
@@ -72,7 +86,7 @@ export function ReviewSubmitButton(props: PrTabContext) {
                       </Text>
                       <Text style={{ color: c.foreground, fontSize: 12 }}>{draft.body}</Text>
                     </View>
-                    <Pressable accessibilityRole="button" onPress={() => removeDraft(repo, number, index)}>
+                    <Pressable accessibilityRole="button" onPress={() => removeDraft(repo, number, headSha, index)}>
                       <Icon name="X" size={14} color={c.foregroundMuted} />
                     </Pressable>
                   </View>

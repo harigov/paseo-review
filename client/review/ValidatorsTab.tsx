@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Pressable, Switch, Text, View } from "react-native";
-import { Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 import {
   validatorsDismissRpc,
   validatorsListRpc,
@@ -10,11 +11,13 @@ import {
   validatorsTestRpc,
   validatorsToggleRpc,
 } from "../../shared/rpc";
-import type { ValidatorFinding, ValidatorResult } from "../../shared/types";
+import { ValidatorResultSchema, type ValidatorFinding, type ValidatorResult } from "../../shared/types";
 import type { PrTabContext } from "../pr/tab-props";
+import { useJobRunner } from "../data/hooks";
 import { addDraft } from "./drafts";
 import { ExplainAction, type ExplainResult } from "./Explain";
 import { validatorScoreboard, ValidatorResultsList } from "./ValidatorResultsList";
+import { Chip, riskColor } from "../ui/chips";
 
 const TEMPLATE = `---
 title: New validator
@@ -27,6 +30,14 @@ not_applicable: Describe when this validator does not apply
 ---
 Ask a single, direct yes/no question about the change here.
 `;
+
+const TestJobResultSchema = z.object({ result: ValidatorResultSchema });
+
+const SEVERITY_COLOR: Record<ValidatorResult["severity"], (c: Parameters<typeof riskColor>[1]) => string> = {
+  blocking: (c) => c.statusDanger,
+  warning: (c) => c.statusWarning,
+  info: (c) => c.foregroundMuted,
+};
 
 function extractTitle(markdown: string): string {
   const match = markdown.split("\n").find((line) => /^title:\s*.+$/.test(line));
@@ -48,6 +59,7 @@ export function ValidatorsTab(props: PrTabContext) {
   const toggleRpc = useRpc(validatorsToggleRpc);
   const testRpc = useRpc(validatorsTestRpc);
   const saveRpc = useRpc(validatorsSaveRpc);
+  const testJob = useJobRunner();
 
   const [explanations, setExplanations] = useState<Record<string, ExplainResult>>({});
   const [newValidatorOpen, setNewValidatorOpen] = useState(false);
@@ -70,7 +82,10 @@ export function ValidatorsTab(props: PrTabContext) {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to toggle validator");
     } finally {
+      // The server may recompute enabled-validator-derived state; refresh both the manage
+      // list and the PR's analysis (scoreboard/findings) so neither goes stale.
       manageQuery.refetch();
+      refresh();
     }
   }
 
@@ -78,9 +93,11 @@ export function ValidatorsTab(props: PrTabContext) {
     try {
       await dismissRpc({ repo, number, validatorId: result.validatorId, unitKey: finding.unitKey });
       toast.show("Dismissed");
-      refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to dismiss");
+    } finally {
+      refresh();
+      manageQuery.refetch();
     }
   }
 
@@ -91,7 +108,7 @@ export function ValidatorsTab(props: PrTabContext) {
     }
     const explanation = explanations[`${result.validatorId}|${finding.unitKey}`]?.explanation;
     const body = `**${result.title}** (${Math.round(finding.probability * 100)}%)\n\n${finding.excerpt}${explanation ? `\n\n${explanation}` : ""}`;
-    addDraft(repo, number, { path: finding.path, line: finding.startLine, side: "RIGHT", body });
+    addDraft(repo, number, analysis?.headSha ?? "", { path: finding.path, line: finding.startLine, side: "RIGHT", body });
     toast.show("Draft comment added");
   }
 
@@ -103,8 +120,17 @@ export function ValidatorsTab(props: PrTabContext) {
   async function testValidator() {
     setTesting(true);
     try {
-      const { result } = await testRpc({ repo, number, markdown: draftMarkdown });
-      setTestResult(result);
+      const finished = await testJob.run(() => testRpc({ repo, number, markdown: draftMarkdown }));
+      if (finished.status === "error") {
+        toast.error(finished.error ?? "Test failed");
+        return;
+      }
+      const parsed = TestJobResultSchema.safeParse(finished.result);
+      if (!parsed.success) {
+        toast.error("Test returned an unexpected result");
+        return;
+      }
+      setTestResult(parsed.data.result);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Test failed");
     } finally {
@@ -130,7 +156,7 @@ export function ValidatorsTab(props: PrTabContext) {
   if (!analysis) return <Text style={{ color: c.foregroundMuted, padding: 16 }}>Loading validators…</Text>;
 
   return (
-    <View style={{ flex: 1, padding: 16, gap: 16 }}>
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16 }}>
       <View style={{ gap: 4 }}>
         <Text style={{ color: c.foreground, fontSize: 13 }}>{validatorScoreboard(analysis.validators)}</Text>
         {!analysis.decisionsEnabled ? (
@@ -188,10 +214,8 @@ export function ValidatorsTab(props: PrTabContext) {
             <Text style={{ color: c.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
               {validator.title}
             </Text>
-            <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>{validator.severity}</Text>
-            <View style={{ borderWidth: 1, borderColor: c.border, borderRadius: 4, paddingHorizontal: 5 }}>
-              <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>{validator.source}</Text>
-            </View>
+            <Chip label={validator.severity} color={SEVERITY_COLOR[validator.severity](c)} />
+            <Chip label={validator.source} color={c.foregroundMuted} />
           </View>
         ))}
       </View>
@@ -221,7 +245,7 @@ export function ValidatorsTab(props: PrTabContext) {
                 onPress={testValidator}
                 style={{ paddingVertical: 6, paddingHorizontal: 10, backgroundColor: c.surface2, borderRadius: 6 }}
               >
-                <Text style={{ color: c.foreground, fontSize: 12 }}>{testing ? "Testing…" : "Test on this PR"}</Text>
+                <Text style={{ color: c.foreground, fontSize: 12 }}>{testing ? `Testing… ${testJob.job?.stage ?? ""}` : "Test on this PR"}</Text>
               </Pressable>
               <Pressable
                 accessibilityRole="button"
@@ -253,6 +277,6 @@ export function ValidatorsTab(props: PrTabContext) {
           </View>
         </Modal.Content>
       </Modal>
-    </View>
+    </ScrollView>
   );
 }

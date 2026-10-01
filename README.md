@@ -21,7 +21,9 @@ A [Paseo](https://paseo.sh) plugin for reviewing large GitHub pull requests.
 - **Chat with a PR** using your own Paseo agents (Claude Code, Codex, Cursor, OpenCode, or your
   agent profiles). It runs in a PR worktree with a read-only toolset.
 - **Rich HTML PR descriptions** (`<!-- paseo:html -->` blocks) rendered in a sandbox, plus
-  agent-generated visual overviews and descriptions.
+  agent-generated visual overviews and descriptions. Blocks must be self-contained (inline
+  SVG/CSS/JS, no injected libraries); Mermaid in the normal markdown body still renders on
+  github.com.
 - **Precompute** analyses PRs that need your review in the background.
 
 ## Requirements
@@ -73,8 +75,14 @@ Other providers:
 - **Self-hosted or any System One-compatible API:** set **Endpoint URL**. It overrides the URL
   for every provider, so you can also point it at a Cloudflare AI Gateway.
 
-**Privacy.** Code is sent to the decision API only for repos you opt in to. The setting is off
-by default. Repos that aren't opted in still get git and path heuristics.
+**Privacy.** Code is sent to the decision API only for repos you opt in to — enforced in the
+analysis pipeline, the validators "Test on this PR" action, and the `/validate` command (which
+resolves your workspace to its registered repo and refuses to run if that repo isn't opted in).
+The setting is off by default. For an opted-in repo, what's sent is diff hunks/file diffs and
+the PR title/body, for validators, module/risk/complexity classification and severity. The
+inbox's attention ranking sends PR metadata only (title, author, size, checks, review decision,
+draft state, age — no code), and only for opted-in repos. Repos that aren't opted in still get
+git and path heuristics, with no code leaving the machine.
 
 **Agents.** Pick an agent per task: summary, chat, explain, visual or describe. The choices come
 from your Paseo agent profiles and available providers.
@@ -119,7 +127,9 @@ summaries, explanations).
 
 Add a hidden block to the PR body. GitHub keeps it but doesn't render it, while PR Review renders
 it in a sandboxed frame on desktop and web. Inline scripts and styles are allowed; network access
-is blocked.
+is blocked. There's no library injection (Mermaid, chart libraries, etc.) — the block must be
+fully self-contained. A Mermaid code fence in the normal markdown part of the body is unaffected
+and still renders natively on github.com.
 
 ```md
 Normal markdown that GitHub shows…

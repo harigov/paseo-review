@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Plugin subprocess runtime: Node globals only, no React Native globals.
+    "types": ["node"]
+  },
+  "include": ["index.server.ts", "server/**/*.ts", "shared/**/*.ts", "tests/**/*.ts"]
+}

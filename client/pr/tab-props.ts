@@ -15,6 +15,8 @@ export interface PrTabContext {
   sinceLastReview: boolean;
   /** Re-fetch PR detail + analysis (e.g. after toggling viewed). */
   refresh(): void;
+  /** Force a fresh analysis run (e.g. after submitting a review, so "since my last review" moves). */
+  reanalyze(): void;
   /** Start or reopen the PR chat; `seed` pre-fills context for the agent. */
   openChat(seed?: string): void;
   /** Switch the PR screen to another tab ("overview", "module:<id>", "validators", "conversations", "visual"). */

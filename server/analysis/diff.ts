@@ -17,6 +17,59 @@ export interface ParsedFile {
 
 interface MutableLine extends DiffLine {}
 
+/** Matches a C-quoted git path: `"` + (any char except `"`/`\`, or `\` + any char)* + `"`. */
+const QUOTED_TOKEN = `"(?:[^"\\\\]|\\\\.)*"`;
+
+/** Un-escapes a C-quoted git path (`\"`, `\\`, `\t`, `\n`, `\ooo` octal bytes); passes through unquoted text unchanged apart from stripping a trailing tab git appends for unquoted paths containing a space. */
+function unquoteGitPath(token: string): string {
+  const t = token.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    const inner = t.slice(1, -1);
+    let out = "";
+    for (let i = 0; i < inner.length; i++) {
+      const c = inner[i];
+      if (c === "\\" && i + 1 < inner.length) {
+        const n = inner[++i];
+        if (n === "n") out += "\n";
+        else if (n === "t") out += "\t";
+        else if (n === '"') out += '"';
+        else if (n === "\\") out += "\\";
+        else if (/[0-7]/.test(n)) {
+          let oct = n;
+          while (oct.length < 3 && /[0-7]/.test(inner[i + 1] ?? "")) oct += inner[++i];
+          out += String.fromCharCode(parseInt(oct, 8));
+        } else out += n;
+      } else out += c;
+    }
+    return out;
+  }
+  // Unquoted path: git still appends a trailing tab after `--- `/`+++ ` paths that contain a
+  // space (no timestamp follows in our pinned diff config), which would otherwise corrupt
+  // every downstream lookup keyed by path.
+  return t.replace(/\t+$/, "");
+}
+
+/** Strips a leading `a/`/`b/` prefix added by our pinned diff config. */
+function stripAbPrefix(token: string): string {
+  return token.startsWith("a/") || token.startsWith("b/") ? token.slice(2) : token;
+}
+
+/**
+ * Best-effort split of the ambiguous `diff --git <old> <new>` header line. When both paths are
+ * quoted this is unambiguous; when unquoted, a path containing the literal substring " b/" can
+ * still split wrong — callers must treat this as a fallback only, never as grounds to infer a
+ * rename (that's decided solely by explicit `rename from/to` lines).
+ */
+function parseHeaderPaths(header: string): { oldPath: string | null; path: string | null } {
+  const quoted = new RegExp(`^diff --git (${QUOTED_TOKEN}) (${QUOTED_TOKEN})$`).exec(header);
+  if (quoted) {
+    return { oldPath: stripAbPrefix(unquoteGitPath(quoted[1])), path: stripAbPrefix(unquoteGitPath(quoted[2])) };
+  }
+  const plain = /^diff --git a\/(.+?) b\/(.+)$/.exec(header);
+  if (!plain) return { oldPath: null, path: null };
+  return { oldPath: plain[1], path: plain[2] };
+}
+
 function parseHunkHeader(line: string): { oldStart: number; oldLines: number; newStart: number; newLines: number } | null {
   const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
   if (!m) return null;
@@ -47,9 +100,12 @@ function splitFileBlocks(raw: string): string[] {
 function parseFileBlock(block: string): ParsedFile {
   const lines = block.split("\n");
   const header = lines[0];
-  const headerMatch = /^diff --git a\/(.+?) b\/(.+)$/.exec(header);
-  let path = headerMatch ? headerMatch[2] : "unknown";
-  let oldPath: string | null = headerMatch ? headerMatch[1] : null;
+  // Fallback only: a binary file (or any file with no `---`/`+++` lines) has nothing more
+  // reliable to go on. Never let this alone decide `status` — only explicit rename/copy
+  // lines below do that, since an unquoted path containing " b/" can split this ambiguously.
+  const headerPaths = parseHeaderPaths(header);
+  let path = headerPaths.path ?? "unknown";
+  let oldPath: string | null = headerPaths.oldPath;
   let status: ParsedFile["status"] = "modified";
   let binary = false;
   let similarity = 0;
@@ -67,25 +123,30 @@ function parseFileBlock(block: string): ParsedFile {
       status = "deleted";
     } else if (line.startsWith("rename from ")) {
       status = "renamed";
-      oldPath = line.slice("rename from ".length);
+      oldPath = unquoteGitPath(line.slice("rename from ".length));
     } else if (line.startsWith("rename to ")) {
-      path = line.slice("rename to ".length);
+      path = unquoteGitPath(line.slice("rename to ".length));
     } else if (line.startsWith("copy from ")) {
       status = "copied";
-      oldPath = line.slice("copy from ".length);
+      oldPath = unquoteGitPath(line.slice("copy from ".length));
     } else if (line.startsWith("copy to ")) {
-      path = line.slice("copy to ".length);
+      path = unquoteGitPath(line.slice("copy to ".length));
     } else if (line.startsWith("similarity index")) {
       similarity = parseInt(line.replace(/[^\d]/g, ""), 10) || 0;
     } else if (line.startsWith("--- ")) {
-      const m = /^--- (?:a\/(.+)|\/dev\/null)$/.exec(line);
-      if (m?.[1]) oldPath = m[1];
+      const m = new RegExp(`^--- (?:(${QUOTED_TOKEN})|a/(.+)|/dev/null)$`).exec(line);
+      if (m?.[1]) oldPath = stripAbPrefix(unquoteGitPath(m[1]));
+      else if (m?.[2]) oldPath = unquoteGitPath(m[2]);
     } else if (line.startsWith("+++ ")) {
-      const m = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/.exec(line);
-      if (m?.[1]) path = m[1];
+      const m = new RegExp(`^\\+\\+\\+ (?:(${QUOTED_TOKEN})|b/(.+)|/dev/null)$`).exec(line);
+      if (m?.[1]) path = stripAbPrefix(unquoteGitPath(m[1]));
+      else if (m?.[2]) path = unquoteGitPath(m[2]);
     }
   }
-  if (status === "modified" && oldPath && oldPath !== path) status = "renamed";
+  // Deliberately no "oldPath !== path => renamed" fallback here: with `-M`/`-C`, git always
+  // emits explicit rename/copy from/to lines for a detected rename, which already set
+  // `status` above. Inferring a rename from a path mismatch alone just re-triggers the
+  // ambiguous-header-split bug for files with no `---`/`+++` lines (e.g. binary files).
   void similarity;
 
   const hunks: Hunk[] = [];
@@ -105,6 +166,9 @@ function parseFileBlock(block: string): ParsedFile {
     const hunkLines: MutableLine[] = [];
     let oldNo = parsedHeader.oldStart;
     let newNo = parsedHeader.newStart;
+    let hunkAdditions = 0;
+    let hunkDeletions = 0;
+    let hunkChanged = 0;
     while (i < lines.length && !lines[i].startsWith("@@") && !lines[i].startsWith("diff --git")) {
       const raw = lines[i];
       if (raw === "" && i === lines.length - 1) {
@@ -116,13 +180,13 @@ function parseFileBlock(block: string): ParsedFile {
       if (marker === "+") {
         hunkLines.push({ kind: "add", oldNo: null, newNo, text, moved: false, whitespaceOnly: false });
         newNo++;
-        additions++;
-        totalLines++;
+        hunkAdditions++;
+        hunkChanged++;
       } else if (marker === "-") {
         hunkLines.push({ kind: "del", oldNo, newNo: null, text, moved: false, whitespaceOnly: false });
         oldNo++;
-        totalLines++;
-        deletions++;
+        hunkChanged++;
+        hunkDeletions++;
       } else if (marker === " " || raw === "") {
         hunkLines.push({ kind: "context", oldNo, newNo, text, moved: false, whitespaceOnly: false });
         oldNo++;
@@ -132,7 +196,14 @@ function parseFileBlock(block: string): ParsedFile {
       }
       i++;
     }
-    if (totalLines <= MAX_LINES_PER_FILE) {
+    // A11: the cap is cumulative per file (MAX_LINES_PER_FILE), but a dropped hunk's lines
+    // must not still count toward `additions`/`deletions` (and therefore `effectiveLines`) —
+    // otherwise file-level stats disagree with `hunks` (and with the ValidationUnits built
+    // from it) by exactly the size of the truncated-away hunks.
+    if (totalLines + hunkChanged <= MAX_LINES_PER_FILE) {
+      totalLines += hunkChanged;
+      additions += hunkAdditions;
+      deletions += hunkDeletions;
       hunks.push({
         header: headerLine,
         oldStart: parsedHeader.oldStart,
@@ -178,29 +249,63 @@ function stripWhitespace(text: string): string {
   return text.replace(/\s+/g, "");
 }
 
+/** Marks contiguous runs of `true` in `matches` of length >= `minLen` as matched in `out` (indices not already set). */
+function markRuns(matches: boolean[], minLen: number, out: boolean[]): void {
+  let i = 0;
+  while (i < matches.length) {
+    if (!matches[i]) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < matches.length && matches[j]) j++;
+    if (j - i >= minLen) for (let k = i; k < j; k++) out[k] = true;
+    i = j + 1;
+  }
+}
+
 /**
  * Annotates moved and whitespace-only lines across every parsed file of a PR, in place, and
  * recomputes each file's `movedLines`/`effectiveLines`.
  *
- * Moved: a run of >=3 consecutive same-kind (add or del) lines in one hunk whose trimmed text
- * each appears on the opposite side anywhere in the PR.
+ * Moved (A6): a run of >=3 consecutive same-kind (add or del) lines in one hunk whose trimmed
+ * text each appears on the opposite side of the SAME file is treated as moved. A shorter match
+ * is too easy to hit by coincidence (shared boilerplate, repeated log/assert lines) once we
+ * widen the search to the whole PR, so cross-file matches require a longer run (>=6) as extra
+ * evidence it's a genuine move and not two unrelated edits that happen to share some lines.
  * Whitespace-only (per hunk): the hunk's removed lines equal its added lines once all
  * whitespace is stripped.
  */
 export function annotateMovesAndWhitespace(files: ParsedFile[]): void {
   const removedText = new Set<string>();
   const addedText = new Set<string>();
+  const removedByFile = new Map<ParsedFile, Set<string>>();
+  const addedByFile = new Map<ParsedFile, Set<string>>();
   for (const file of files) {
+    const removedHere = new Set<string>();
+    const addedHere = new Set<string>();
     for (const hunk of file.hunks) {
       for (const line of hunk.lines) {
-        if (line.kind === "del" && qualifies(line.text)) removedText.add(line.text.trim());
-        else if (line.kind === "add" && qualifies(line.text)) addedText.add(line.text.trim());
+        if (line.kind === "del" && qualifies(line.text)) {
+          removedText.add(line.text.trim());
+          removedHere.add(line.text.trim());
+        } else if (line.kind === "add" && qualifies(line.text)) {
+          addedText.add(line.text.trim());
+          addedHere.add(line.text.trim());
+        }
       }
     }
+    removedByFile.set(file, removedHere);
+    addedByFile.set(file, addedHere);
   }
 
   for (const file of files) {
     let movedLines = 0;
+    const sameFileOpposite = {
+      add: removedByFile.get(file) ?? new Set<string>(),
+      del: addedByFile.get(file) ?? new Set<string>(),
+    };
+    const globalOpposite = { add: removedText, del: addedText };
     for (const hunk of file.hunks) {
       // Whitespace-only hunk check.
       const dels = hunk.lines.filter((l) => l.kind === "del").map((l) => stripWhitespace(l.text));
@@ -216,23 +321,18 @@ export function annotateMovesAndWhitespace(files: ParsedFile[]): void {
       let runKind: "add" | "del" | null = null;
       const flushRun = (end: number) => {
         if (runKind === null || runStart < 0) return;
-        const opposite = runKind === "add" ? removedText : addedText;
-        const matches = hunk.lines.slice(runStart, end).map((l) => qualifies(l.text) && opposite.has(l.text.trim()));
-        let i = 0;
-        while (i < matches.length) {
-          if (!matches[i]) {
-            i++;
-            continue;
+        const runLines = hunk.lines.slice(runStart, end);
+        const matchesSameFile = runLines.map((l) => qualifies(l.text) && sameFileOpposite[runKind!].has(l.text.trim()));
+        const matchesGlobal = runLines.map((l) => qualifies(l.text) && globalOpposite[runKind!].has(l.text.trim()));
+        const matched = new Array<boolean>(runLines.length).fill(false);
+        markRuns(matchesSameFile, 3, matched);
+        const remainingGlobal = matchesGlobal.map((v, idx) => v && !matched[idx]);
+        markRuns(remainingGlobal, 6, matched);
+        for (let k = 0; k < runLines.length; k++) {
+          if (matched[k]) {
+            hunk.lines[runStart + k].moved = true;
+            movedLines++;
           }
-          let j = i;
-          while (j < matches.length && matches[j]) j++;
-          if (j - i >= 3) {
-            for (let k = i; k < j; k++) {
-              hunk.lines[runStart + k].moved = true;
-              movedLines++;
-            }
-          }
-          i = j + 1;
         }
       };
       for (let idx = 0; idx < hunk.lines.length; idx++) {
@@ -250,12 +350,18 @@ export function annotateMovesAndWhitespace(files: ParsedFile[]): void {
       hunk.pureMove = changed.length > 0 && changed.every((l) => l.moved);
     }
     file.movedLines = movedLines;
-    const whitespaceLines = file.hunks.reduce(
-      (sum, hunk) => sum + hunk.lines.filter((l) => l.kind !== "context" && l.whitespaceOnly).length,
-      0,
-    );
+    // A5: count each changed line once even when it's flagged both moved AND whitespace-only
+    // (e.g. a >=3-line pure-indentation hunk, whose del/add pairs are also trivially "moved"
+    // matches of each other once whitespace is trimmed) — summing the two counts independently
+    // over-subtracts and can zero out an unrelated, genuinely real hunk in the same file.
+    let noiseLines = 0;
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.kind !== "context" && (line.moved || line.whitespaceOnly)) noiseLines++;
+      }
+    }
     const total = file.additions + file.deletions;
-    file.effectiveLines = Math.max(0, total - movedLines - whitespaceLines);
+    file.effectiveLines = Math.max(0, total - noiseLines);
   }
 }
 

@@ -9,8 +9,18 @@ const jobs = new Map<string, Job>();
 const listeners = new Map<string, Set<() => void>>();
 const byKey = new Map<string, string>();
 
+/** How long a finished job's result stays available for polling before it's evicted. */
+const JOB_RETENTION_MS = 10 * 60_000;
+
 function notify(id: string) {
   for (const listener of listeners.get(id) ?? []) listener();
+}
+
+function evict(id: string, dedupeKey?: string) {
+  jobs.delete(id);
+  const set = listeners.get(id);
+  if (set && set.size === 0) listeners.delete(id);
+  if (dedupeKey && byKey.get(dedupeKey) === id) byKey.delete(dedupeKey);
 }
 
 /**
@@ -65,6 +75,8 @@ export function startJob(
     .finally(() => {
       job.finishedAt = new Date().toISOString();
       notify(id);
+      const evictTimer = setTimeout(() => evict(id, dedupeKey), JOB_RETENTION_MS);
+      (evictTimer as unknown as { unref?: () => void }).unref?.();
     });
   return id;
 }
@@ -84,6 +96,7 @@ export async function pollJob(id: string, waitMs = 0): Promise<Job> {
     const done = () => {
       clearTimeout(timer);
       set.delete(done);
+      if (set.size === 0) listeners.delete(id);
       resolve();
     };
     const timer = setTimeout(done, Math.min(waitMs, 20_000));

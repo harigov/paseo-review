@@ -1,4 +1,9 @@
-import type { PluginClientContext, PluginSurfaceProps } from "@getpaseo/plugin/client";
+import type {
+  PluginClientContext,
+  PluginSurfaceProps,
+  PluginGlobalCommandContext,
+  PluginWorkspaceCommandContext,
+} from "@getpaseo/plugin/client";
 import type { ComponentType } from "react";
 import { PrReviewApp } from "./client/app/App";
 import { LocalValidatePanel } from "./client/local/LocalValidatePanel";
@@ -22,7 +27,7 @@ function hasScreenApi(client: PluginClientContext): client is PluginClientContex
 }
 
 export default function contribute(client: PluginClientContext) {
-  const cleanups: Array<() => void> = [];
+  const cleanups: Array<() => void | Promise<void>> = [];
 
   if (hasScreenApi(client)) {
     cleanups.push(client.addScreen({ id: SURFACE_ID, title: TITLE, Component: PrReviewApp }));
@@ -51,8 +56,8 @@ export default function contribute(client: PluginClientContext) {
       title: "Open PR Review",
       icon: "GitPullRequest",
       context: "global",
-      onSelect: ({ openSurface }: { openSurface(id: string): void }) => openSurface(SURFACE_ID),
-    } as never),
+      onSelect: ({ openSurface }: PluginGlobalCommandContext) => openSurface(SURFACE_ID),
+    }),
   );
 
   cleanups.push(
@@ -61,9 +66,9 @@ export default function contribute(client: PluginClientContext) {
       title: "Run validators on this workspace",
       icon: "ShieldCheck",
       context: "workspace",
-      onSelect: ({ openPanel, workspace }: { openPanel: PluginClientContext["openPanel"]; workspace: { id: string } }) =>
-        openPanel("validate", { workspaceId: workspace.id }),
-    } as never),
+      // `openPanel` here is already scoped to `workspace` by the command context; it takes no workspaceId.
+      onSelect: ({ openPanel }: PluginWorkspaceCommandContext) => openPanel("validate"),
+    }),
   );
 
   cleanups.push(
@@ -72,17 +77,22 @@ export default function contribute(client: PluginClientContext) {
       description: "Run PR Review validators on this workspace's changes",
       argumentHint: "[base-ref]",
       context: "workspace",
-      async onSubmit({ args, rpc, workspace, openPanel }: any) {
+      async onSubmit({ args, rpc, workspace, openPanel }: PluginWorkspaceCommandContext & { args: string }) {
         await rpc(localValidateRpc, { cwd: workspace.directory, baseRef: args || undefined });
-        openPanel("validate", { workspaceId: workspace.id });
+        openPanel("validate");
       },
-    } as never),
+    }),
   );
 
   return () => {
     for (const cleanup of cleanups.reverse()) {
       try {
-        cleanup();
+        // Cleanups may be async (`PluginCleanup` allows `Promise<void>`); catch rejections too,
+        // not just synchronous throws, so one failing cleanup never blocks the rest or leaks
+        // an unhandled rejection during unload.
+        void Promise.resolve(cleanup()).catch(() => {
+          // host teardown continues
+        });
       } catch {
         // host teardown continues
       }

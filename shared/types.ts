@@ -225,6 +225,10 @@ export const AnalysisSchema = z.object({
   richDescriptionHtml: z.string().nullable(),
   visualOverviewHtml: z.string().nullable(),
   guidanceFiles: z.array(z.string()),
+  /** Decision-model verdicts keyed by review thread id (unresolved threads only). */
+  threadTriage: z
+    .record(z.string(), z.object({ triage: ThreadTriageSchema, probability: z.number() }))
+    .default({}),
 });
 export type Analysis = z.infer<typeof AnalysisSchema>;
 

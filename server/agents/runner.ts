@@ -53,20 +53,11 @@ export async function extractLastAssistantText(agent: AgentHandleLike): Promise<
   const entries = (payload as { entries?: unknown[] } | null)?.entries;
   if (!Array.isArray(entries)) return null;
   for (let i = entries.length - 1; i >= 0; i--) {
-    const item = (entries[i] as { item?: { type?: string; text?: unknown; content?: unknown[] } } | undefined)?.item;
+    // Paseo's `assistant_message` timeline item is always `{type, text: string}` — no
+    // multi-block `content` array in this protocol version — so a plain string read suffices.
+    const item = (entries[i] as { item?: { type?: string; text?: unknown } } | undefined)?.item;
     if (!item || item.type !== "assistant_message") continue;
-    let text = "";
-    if (typeof item.text === "string") {
-      text = item.text;
-    } else if (Array.isArray(item.content)) {
-      text = item.content
-        .filter((b): b is { type: string; text: string } => {
-          const block = b as { type?: unknown; text?: unknown };
-          return block?.type === "text" && typeof block.text === "string";
-        })
-        .map((b) => b.text)
-        .join("");
-    }
+    const text = typeof item.text === "string" ? item.text : "";
     const trimmed = text.trim();
     if (trimmed) return trimmed;
   }

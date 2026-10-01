@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRpc } from "@getpaseo/plugin/client";
 import {
   inboxListRpc,
@@ -65,30 +65,56 @@ export function useAnalysis(repo: string, number: number, enabled = true) {
  * Starts a long-running job and polls it to completion.
  * `run(start)` kicks off `start()` (which must return `{ jobId }`), then polls
  * `prr.job.poll` (15s long-poll) until the job is `done` or `error`.
+ *
+ * Cancels its own poll loop on unmount (and on `cancel()`), and never calls
+ * `setState` after that: the loop checks `runningRef` on every iteration and
+ * every state update goes through a mounted guard.
  */
 export function useJobRunner() {
   const poll = useRpc(jobPollRpc);
   const [job, setJob] = useState<Job | null>(null);
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Unmounting stops the poll loop (runningRef) and blocks further setState.
+      mountedRef.current = false;
+      runningRef.current = false;
+    };
+  }, []);
+
+  function setJobIfMounted(next: Job) {
+    if (mountedRef.current) setJob(next);
+  }
+  function setRunningIfMounted(next: boolean) {
+    if (mountedRef.current) setRunning(next);
+  }
 
   async function run(start: () => Promise<{ jobId: string }>): Promise<Job> {
-    setRunning(true);
     runningRef.current = true;
+    setRunningIfMounted(true);
     try {
       const { jobId } = await start();
       let current = await poll({ jobId, waitMs: 15_000 });
-      setJob(current);
+      setJobIfMounted(current);
       while (runningRef.current && current.status !== "done" && current.status !== "error") {
         current = await poll({ jobId, waitMs: 15_000 });
-        setJob(current);
+        setJobIfMounted(current);
       }
       return current;
     } finally {
       runningRef.current = false;
-      setRunning(false);
+      setRunningIfMounted(false);
     }
   }
 
-  return { run, job, running };
+  /** Stops polling after the in-flight poll resolves; does not cancel the job server-side. */
+  function cancel() {
+    runningRef.current = false;
+  }
+
+  return { run, job, running, cancel };
 }

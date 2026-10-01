@@ -47,7 +47,10 @@ function mapSearchChecks(state: string | null | undefined): ChecksState {
 function mapCheckRunState(status: string | null | undefined, conclusion: string | null | undefined): ChecksState {
   if (conclusion) {
     if (conclusion === "SUCCESS") return "success";
-    if (["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(conclusion)) {
+    // CheckConclusionState: ACTION_REQUIRED, TIMED_OUT, CANCELLED, FAILURE, STARTUP_FAILURE are
+    // failures; NEUTRAL/SKIPPED/STALE fall through to "none" below (there is no "ERROR" value
+    // on this enum — that's only on the legacy StatusState used by mapSearchChecks).
+    if (["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(conclusion)) {
       return "failure";
     }
     return "none";
@@ -59,6 +62,27 @@ function mapCheckRunState(status: string | null | undefined, conclusion: string 
 function mapReviewDecision(decision: string | null | undefined): ReviewDecisionValue {
   if (decision === "APPROVED" || decision === "CHANGES_REQUESTED" || decision === "REVIEW_REQUIRED") return decision;
   return "NONE";
+}
+
+/** Small bounded cache: evicts the least-recently-written entry once `maxSize` is exceeded, so
+ * long-lived daemon processes don't accumulate one entry per PR/key ever seen. */
+class BoundedCache<V> {
+  private readonly map = new Map<string, V>();
+  constructor(private readonly maxSize: number) {}
+  get(key: string): V | undefined {
+    return this.map.get(key);
+  }
+  set(key: string, value: V): void {
+    this.map.delete(key);
+    this.map.set(key, value);
+    if (this.map.size > this.maxSize) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+  }
+  delete(key: string): void {
+    this.map.delete(key);
+  }
 }
 
 // ---------- gh viewer ----------
@@ -94,10 +118,14 @@ async function fetchRepos(): Promise<{ repos: Repo[]; errors: string[] }> {
   }
 
   const settings = await getSettings();
+  const decisionRepos = new Set(settings.decisionRepos.map((s) => s.toLowerCase()));
 
   await Promise.all(
     projects.map(async (raw) => {
       const project = raw as Record<string, unknown>;
+      // `projectKind`/`projectRootPath`/`projectDisplayName`/`projectId` are the real 0.10.2
+      // field names (verified against @getpaseo/protocol's WorkspaceProjectDescriptorPayload);
+      // the `??` fallbacks are kept only in case an older host sends a different shape.
       const kind = (project.projectKind ?? project.kind) as string | undefined;
       if (kind === "non_git" || kind === "directory") return;
       const rootPath = (project.projectRootPath ?? project.path) as string | undefined;
@@ -131,7 +159,7 @@ async function fetchRepos(): Promise<{ repos: Repo[]; errors: string[] }> {
         projectId,
         projectName,
         rootPath,
-        decisionsEnabled: settings.decisionRepos.includes(fullSlug),
+        decisionsEnabled: decisionRepos.has(fullSlug.toLowerCase()),
       });
     }),
   );
@@ -146,9 +174,22 @@ async function listRepos(): Promise<{ repos: Repo[]; errors: string[] }> {
   return value;
 }
 
+/** Case-insensitive lookup that returns the canonically-cased `Repo` as registered, so a
+ * differently-cased RPC input still resolves to one consistent slug for cache keys, GraphQL
+ * calls and on-disk file names. */
 async function findRepo(slug: string): Promise<Repo | null> {
   const { repos } = await listRepos();
-  return repos.find((repo) => repo.slug === slug) ?? null;
+  const lower = slug.toLowerCase();
+  return repos.find((repo) => repo.slug.toLowerCase() === lower) ?? null;
+}
+
+/** Validates that `slug` is one of the repos registered as a Paseo project (the plan's stated
+ * scope) and returns its canonical form. Every github RPC handler must call this before using
+ * the caller-supplied repo string for a GraphQL call, a `gh` invocation, or a data-file path. */
+async function requireRepo(slug: string): Promise<Repo> {
+  const repo = await findRepo(slug);
+  if (!repo) throw new Error(`"${slug}" is not a repo registered as a Paseo project.`);
+  return repo;
 }
 
 // ---------- inbox ----------
@@ -237,6 +278,56 @@ interface InboxCacheValue {
 let inboxCache: { at: number; value: InboxCacheValue } | null = null;
 const INBOX_TTL_MS = 30_000;
 
+/** Decision-model "needs my attention" score, cached per PR#head so a background fill from one
+ * refresh is visible on the next, without ever blocking (or failing) the inbox response. */
+const attentionCache = new BoundedCache<{ headSha: string; value: number | null }>(1000);
+
+async function fillAttention(prs: PrSummary[]): Promise<void> {
+  const toScore: PrSummary[] = [];
+  for (const pr of prs) {
+    const key = `${pr.repo.toLowerCase()}#${pr.number}`;
+    const cached = attentionCache.get(key);
+    if (cached && cached.headSha === pr.headSha) {
+      pr.attention = cached.value;
+    } else {
+      toScore.push(pr);
+    }
+  }
+  if (!toScore.length) return;
+  // Fire-and-forget: a decision-API round trip must never block or fail the inbox RPC. Results
+  // land in the cache for the *next* refresh.
+  void services.decide
+    .attention(toScore)
+    .then((scores) => {
+      toScore.forEach((pr, i) => {
+        attentionCache.set(`${pr.repo.toLowerCase()}#${pr.number}`, { headSha: pr.headSha, value: scores[i] ?? null });
+      });
+    })
+    .catch(() => {
+      // best-effort; leave attention null until it succeeds
+    });
+}
+
+async function fillInboxEnrichment(prs: PrSummary[], repos: Repo[]): Promise<void> {
+  const decisionsEnabled = new Map(repos.map((r) => [r.slug.toLowerCase(), r.decisionsEnabled]));
+  await Promise.all(
+    prs.map(async (pr) => {
+      try {
+        const enrichment = await services.analysis.getInboxEnrichment(pr.repo, pr.number, pr.headSha);
+        if (enrichment) {
+          pr.severity = enrichment.severity;
+          pr.changeType = enrichment.changeType;
+          pr.changedSinceMyReview = enrichment.changedSinceMyReview;
+        }
+      } catch {
+        // Enrichment is a best-effort cache read; never fail the inbox over it.
+      }
+    }),
+  );
+  const eligible = prs.filter((pr) => decisionsEnabled.get(pr.repo.toLowerCase()));
+  if (eligible.length) await fillAttention(eligible);
+}
+
 async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
   if (!refresh && inboxCache && Date.now() - inboxCache.at < INBOX_TTL_MS) return inboxCache.value;
 
@@ -301,9 +392,12 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
     if (inboxCache) return inboxCache.value;
   }
 
+  const prs = [...merged.values()];
+  await fillInboxEnrichment(prs, repos);
+
   const value: InboxCacheValue = {
     viewer,
-    prs: [...merged.values()],
+    prs,
     fetchedAt: new Date().toISOString(),
     errors,
   };
@@ -325,6 +419,30 @@ interface StatusContextEntry {
   context: string;
   state: string | null;
   targetUrl: string | null;
+}
+
+interface PageInfo {
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+interface CommentNode {
+  id: string;
+  author: { login: string } | null;
+  body: string;
+  createdAt: string;
+  url: string;
+}
+
+interface ThreadNode {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+  diffSide: "LEFT" | "RIGHT" | null;
+  comments: { pageInfo: PageInfo; nodes: CommentNode[] };
 }
 
 interface PrQueryResult {
@@ -352,26 +470,20 @@ interface PrQueryResult {
     nodes: Array<{ commit: { statusCheckRollup: { state: string | null; contexts: { nodes: Array<CheckRunContext | StatusContextEntry> } } | null } }>;
   };
   files: {
-    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    pageInfo: PageInfo;
     nodes: Array<{ path: string; additions: number; deletions: number; changeType: string; viewerViewedState: string }>;
   };
-  reviewThreads: {
-    nodes: Array<{
-      id: string;
-      isResolved: boolean;
-      isOutdated: boolean;
-      path: string;
-      line: number | null;
-      originalLine: number | null;
-      diffSide: "LEFT" | "RIGHT" | null;
-      comments: { nodes: Array<{ id: string; author: { login: string } | null; body: string; createdAt: string; url: string }> };
-    }>;
-  };
+  reviewThreads: { pageInfo: PageInfo; nodes: ThreadNode[] };
   reviews: { nodes: Array<{ submittedAt: string | null; author: { login: string } | null; commit: { oid: string } | null }> };
 }
 
-function buildPrQuery(owner: string, name: string, number: number, after: string | null): string {
-  const afterClause = after ? `, after: ${gqlString(after)}` : "";
+const THREAD_FIELDS = `
+  id isResolved isOutdated path line originalLine diffSide
+  comments(first: 50) { pageInfo { hasNextPage endCursor } nodes { id author { login } body createdAt url } }
+`;
+
+/** Full PR fetch: core fields plus the first page each of files and review threads. */
+function buildPrCoreQuery(owner: string, name: string, number: number, viewerLogin: string): string {
   return `
     query {
       repository(owner: ${gqlString(owner)}, name: ${gqlString(name)}) {
@@ -399,17 +511,15 @@ function buildPrQuery(owner: string, name: string, number: number, after: string
               }
             }
           }
-          files(first: 100${afterClause}) {
+          files(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes { path additions deletions changeType viewerViewedState }
           }
           reviewThreads(first: 100) {
-            nodes {
-              id isResolved isOutdated path line originalLine diffSide
-              comments(first: 50) { nodes { id author { login } body createdAt url } }
-            }
+            pageInfo { hasNextPage endCursor }
+            nodes { ${THREAD_FIELDS} }
           }
-          reviews(last: 20, states: [APPROVED, CHANGES_REQUESTED, COMMENTED]) {
+          reviews(last: 1, author: ${gqlString(viewerLogin)}, states: [APPROVED, CHANGES_REQUESTED, COMMENTED]) {
             nodes { submittedAt author { login } commit { oid } }
           }
         }
@@ -418,29 +528,104 @@ function buildPrQuery(owner: string, name: string, number: number, after: string
   `;
 }
 
+/** Lean follow-up query for additional pages of files only (no threads/commits/labels). */
+function buildFilesPageQuery(owner: string, name: string, number: number, after: string): string {
+  return `
+    query {
+      repository(owner: ${gqlString(owner)}, name: ${gqlString(name)}) {
+        pullRequest(number: ${number}) {
+          files(first: 100, after: ${gqlString(after)}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { path additions deletions changeType viewerViewedState }
+          }
+        }
+      }
+    }
+  `;
+}
+
+/** Lean follow-up query for additional pages of review threads only. */
+function buildThreadsPageQuery(owner: string, name: string, number: number, after: string): string {
+  return `
+    query {
+      repository(owner: ${gqlString(owner)}, name: ${gqlString(name)}) {
+        pullRequest(number: ${number}) {
+          reviewThreads(first: 100, after: ${gqlString(after)}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { ${THREAD_FIELDS} }
+          }
+        }
+      }
+    }
+  `;
+}
+
+/** Follow-up query for additional comment pages within one thread. */
+function buildThreadCommentsPageQuery(threadId: string, after: string): string {
+  return `
+    query {
+      node(id: ${gqlString(threadId)}) {
+        ... on PullRequestReviewThread {
+          comments(first: 50, after: ${gqlString(after)}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id author { login } body createdAt url }
+          }
+        }
+      }
+    }
+  `;
+}
+
 const FILE_CAP = 3000;
+const THREAD_CAP = 1000;
+const COMMENTS_PER_THREAD_CAP = 300;
 
 async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   const { owner, name } = splitRepo(repo);
   const viewer = await getViewer();
 
-  let basePr: PrQueryResult | null = null;
-  const files: PrQueryResult["files"]["nodes"] = [];
-  let after: string | null = null;
-  for (let page = 0; page < 30; page++) {
-    const raw = await graphql(buildPrQuery(owner, name, number, after));
-    const data = raw as { repository: { pullRequest: PrQueryResult | null } | null };
-    const pr = data.repository?.pullRequest;
-    if (!pr) throw new Error(`Pull request ${repo}#${number} was not found on GitHub.`);
-    if (!basePr) basePr = pr;
-    files.push(...(pr.files?.nodes ?? []));
-    const pageInfo = pr.files?.pageInfo;
-    if (!pageInfo?.hasNextPage || files.length >= FILE_CAP) break;
-    after = pageInfo.endCursor;
-  }
+  const coreRaw = await graphql(buildPrCoreQuery(owner, name, number, viewer));
+  const coreData = coreRaw as { repository: { pullRequest: PrQueryResult | null } | null };
+  const basePr = coreData.repository?.pullRequest;
   if (!basePr) throw new Error(`Pull request ${repo}#${number} was not found on GitHub.`);
 
-  const threads: Thread[] = (basePr.reviewThreads?.nodes ?? []).map((t) => ({
+  // Files: continue pagination with a lean query (no threads/commits/labels re-fetched).
+  const files = [...(basePr.files?.nodes ?? [])];
+  let filesPageInfo = basePr.files?.pageInfo ?? { hasNextPage: false, endCursor: null };
+  while (filesPageInfo.hasNextPage && filesPageInfo.endCursor && files.length < FILE_CAP) {
+    const raw = await graphql(buildFilesPageQuery(owner, name, number, filesPageInfo.endCursor));
+    const page = (raw as { repository: { pullRequest: { files: PrQueryResult["files"] } | null } | null }).repository
+      ?.pullRequest?.files;
+    files.push(...(page?.nodes ?? []));
+    filesPageInfo = page?.pageInfo ?? { hasNextPage: false, endCursor: null };
+  }
+
+  // Review threads: continue pagination with a lean query (G3 — previously hard-capped at 100).
+  const threadNodes = [...(basePr.reviewThreads?.nodes ?? [])];
+  let threadsPageInfo = basePr.reviewThreads?.pageInfo ?? { hasNextPage: false, endCursor: null };
+  while (threadsPageInfo.hasNextPage && threadsPageInfo.endCursor && threadNodes.length < THREAD_CAP) {
+    const raw = await graphql(buildThreadsPageQuery(owner, name, number, threadsPageInfo.endCursor));
+    const page = (raw as { repository: { pullRequest: { reviewThreads: PrQueryResult["reviewThreads"] } | null } | null })
+      .repository?.pullRequest?.reviewThreads;
+    threadNodes.push(...(page?.nodes ?? []));
+    threadsPageInfo = page?.pageInfo ?? { hasNextPage: false, endCursor: null };
+  }
+
+  // Comments: only threads whose first 50 were already truncated pay for extra round trips.
+  await Promise.all(
+    threadNodes.map(async (t) => {
+      let pageInfo = t.comments?.pageInfo ?? { hasNextPage: false, endCursor: null };
+      while (pageInfo.hasNextPage && pageInfo.endCursor && t.comments.nodes.length < COMMENTS_PER_THREAD_CAP) {
+        const raw = await graphql(buildThreadCommentsPageQuery(t.id, pageInfo.endCursor));
+        const page = (raw as { node: { comments: { pageInfo: PageInfo; nodes: CommentNode[] } } | null }).node?.comments;
+        if (!page) break;
+        t.comments.nodes.push(...page.nodes);
+        pageInfo = page.pageInfo;
+      }
+    }),
+  );
+
+  const threads: Thread[] = threadNodes.map((t) => ({
     id: t.id,
     path: t.path,
     line: t.line ?? null,
@@ -475,10 +660,9 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
     return { name: c.context, state: mapSearchChecks(c.state), url: c.targetUrl ?? null };
   });
 
-  const myReviews = (basePr.reviews?.nodes ?? [])
-    .filter((r) => r.author?.login && r.author.login.toLowerCase() === viewer.toLowerCase())
-    .sort((a, b) => (a.submittedAt ?? "").localeCompare(b.submittedAt ?? ""));
-  const myLastReviewSha = myReviews.length ? myReviews[myReviews.length - 1]?.commit?.oid ?? null : null;
+  // `reviews` is already filtered server-side to this viewer's latest matching review (X8), so
+  // this is correct even on busy PRs where the viewer's review is far from the most recent one.
+  const myLastReviewSha = basePr.reviews?.nodes?.[0]?.commit?.oid ?? null;
 
   const unresolvedThreads = threads.filter((t) => !t.isResolved).length;
   const summary: PrSummary = {
@@ -523,37 +707,29 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   };
 }
 
-const prCache = new Map<string, { at: number; value: PrDetail }>();
-const prRefCache = new Map<string, { nodeId: string; headSha: string }>();
+const prCache = new BoundedCache<{ at: number; value: PrDetail }>(200);
 const PR_TTL_MS = 20_000;
 
 async function getPr(repo: string, number: number, refresh?: boolean): Promise<PrDetail> {
-  const key = `${repo}#${number}`;
+  const key = `${repo.toLowerCase()}#${number}`;
   if (!refresh) {
     const cached = prCache.get(key);
     if (cached && Date.now() - cached.at < PR_TTL_MS) return cached.value;
   }
   const detail = await fetchPrDetail(repo, number);
   prCache.set(key, { at: Date.now(), value: detail });
-  prRefCache.set(key, { nodeId: detail.nodeId, headSha: detail.summary.headSha });
   return detail;
 }
 
+function invalidatePr(repo: string, number: number): void {
+  prCache.delete(`${repo.toLowerCase()}#${number}`);
+}
+
+/** Node id + head sha for mutations. Shares `getPr`'s TTL/cache (X6) instead of its own
+ * never-expiring cache, so a recorded "viewed" blob sha can't go stale after new commits land. */
 async function getPrRef(repo: string, number: number): Promise<{ nodeId: string; headSha: string }> {
-  const key = `${repo}#${number}`;
-  const cachedDetail = prCache.get(key);
-  if (cachedDetail) return { nodeId: cachedDetail.value.nodeId, headSha: cachedDetail.value.summary.headSha };
-  const cachedRef = prRefCache.get(key);
-  if (cachedRef) return cachedRef;
-  const { owner, name } = splitRepo(repo);
-  const data = await graphql<{ repository: { pullRequest: { id: string; headRefOid: string } | null } | null }>(
-    `query { repository(owner: ${gqlString(owner)}, name: ${gqlString(name)}) { pullRequest(number: ${number}) { id headRefOid } } }`,
-  );
-  const pr = data.repository?.pullRequest;
-  if (!pr) throw new Error(`Pull request ${repo}#${number} was not found on GitHub.`);
-  const ref = { nodeId: pr.id, headSha: pr.headRefOid };
-  prRefCache.set(key, ref);
-  return ref;
+  const detail = await getPr(repo, number);
+  return { nodeId: detail.nodeId, headSha: detail.summary.headSha };
 }
 
 async function setViewed(repo: string, number: number, filePath: string, viewed: boolean): Promise<ViewedState> {
@@ -585,15 +761,20 @@ export function registerGitHubHandlers(server: PluginServerContext): void {
 
   handle(server, inboxListRpc, async (input) => services.github.listInbox(input.refresh));
 
-  handle(server, prGetRpc, async (input) => services.github.getPr(input.repo, input.number, input.refresh));
+  handle(server, prGetRpc, async (input) => {
+    const repo = await requireRepo(input.repo);
+    return services.github.getPr(repo.slug, input.number, input.refresh);
+  });
 
   handle(server, fileViewedRpc, async (input) => {
-    const viewedState = await services.github.setViewed(input.repo, input.number, input.path, input.viewed);
+    const repo = await requireRepo(input.repo);
+    const viewedState = await services.github.setViewed(repo.slug, input.number, input.path, input.viewed);
     return { path: input.path, viewed: viewedState };
   });
 
   handle(server, reviewSubmitRpc, async (input) => {
-    const { owner, name } = splitRepo(input.repo);
+    const repo = await requireRepo(input.repo);
+    const { owner, name } = splitRepo(repo.slug);
     try {
       const result = await run(
         "gh",
@@ -609,6 +790,9 @@ export function registerGitHubHandlers(server: PluginServerContext): void {
       } catch {
         htmlUrl = undefined;
       }
+      // The submitted review changes threads/reviewDecision/myLastReviewSha: don't serve the
+      // now-stale cached PrDetail for the rest of its TTL (X5 — client triggers re-analysis).
+      invalidatePr(repo.slug, input.number);
       return { url: typeof htmlUrl === "string" ? htmlUrl : null };
     } catch (error) {
       throw new Error(`Could not submit the review: ${errorMessage(error)}`);
@@ -616,6 +800,7 @@ export function registerGitHubHandlers(server: PluginServerContext): void {
   });
 
   handle(server, threadReplyRpc, async (input) => {
+    const repo = await requireRepo(input.repo);
     try {
       await graphql(
         `mutation { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: ${gqlString(input.threadId)}, body: ${gqlString(input.body)} }) { clientMutationId } }`,
@@ -625,6 +810,7 @@ export function registerGitHubHandlers(server: PluginServerContext): void {
           `mutation { resolveReviewThread(input: { threadId: ${gqlString(input.threadId)} }) { clientMutationId } }`,
         );
       }
+      invalidatePr(repo.slug, input.number);
       return { ok: true, message: null };
     } catch (error) {
       return { ok: false, message: errorMessage(error) };

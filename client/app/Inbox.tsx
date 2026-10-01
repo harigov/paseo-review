@@ -5,6 +5,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useInbox, useRepos } from "../data/hooks";
 import type { InboxSection, PrSummary } from "../../shared/types";
 
+type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 type ReviewDecision = PrSummary["reviewDecision"];
 
 type SortKey = "attention" | "updated" | "created" | "size" | "severity";
@@ -39,6 +40,30 @@ const REVIEW_LABEL: Record<ReviewDecision, string> = {
   REVIEW_REQUIRED: "Review required",
   NONE: "",
 };
+
+/**
+ * A pressable filter/sort pill (distinct from `client/ui/chips.tsx`'s `Chip`, which is a
+ * non-interactive status badge). Module-scope so it isn't redefined — and every instance
+ * remounted — on every `Inbox` render.
+ */
+function FilterChip({ label, active, onPress, c }: { label: string; active: boolean; onPress(): void; c: ThemeColors }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => ({
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: active ? c.accent : c.border,
+        backgroundColor: active ? c.accent : pressed ? c.surface2 : c.surface1,
+      })}
+    >
+      <Text style={{ fontSize: 12, color: active ? c.accentForeground : c.foreground }}>{label}</Text>
+    </Pressable>
+  );
+}
 
 export function Inbox({
   theme,
@@ -113,25 +138,6 @@ export function Inbox({
     return out;
   }, [filtered, collapsed, effectiveSort]);
 
-  function Chip({ label, active, onPress }: { label: string; active: boolean; onPress(): void }) {
-    return (
-      <Pressable
-        accessibilityRole="button"
-        onPress={onPress}
-        style={({ pressed }) => ({
-          paddingHorizontal: 10,
-          paddingVertical: 5,
-          borderRadius: 14,
-          borderWidth: 1,
-          borderColor: active ? c.accent : c.border,
-          backgroundColor: active ? c.accent : pressed ? c.surface2 : c.surface1,
-        })}
-      >
-        <Text style={{ fontSize: 12, color: active ? c.accentForeground : c.foreground }}>{label}</Text>
-      </Pressable>
-    );
-  }
-
   const sortLabels: Record<SortKey, string> = {
     attention: "Sort: Attention",
     updated: "Sort: Updated",
@@ -185,15 +191,15 @@ export function Inbox({
         </View>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {(repos.data?.repos ?? []).map((repo) => (
-            <Chip key={repo.slug} label={repo.slug} active={repoFilter === repo.slug} onPress={() => setRepoFilter((cur) => (cur === repo.slug ? null : repo.slug))} />
+            <FilterChip c={c} key={repo.slug} label={repo.slug} active={repoFilter === repo.slug} onPress={() => setRepoFilter((cur) => (cur === repo.slug ? null : repo.slug))} />
           ))}
-          <Chip label={hideDrafts ? "Drafts hidden" : "Hide drafts"} active={hideDrafts} onPress={() => setHideDrafts((v) => !v)} />
-          <Chip
+          <FilterChip c={c} label={hideDrafts ? "Drafts hidden" : "Hide drafts"} active={hideDrafts} onPress={() => setHideDrafts((v) => !v)} />
+          <FilterChip c={c}
             label={ciFilter === "any" ? "CI: any" : ciFilter === "failing" ? "CI: failing" : "CI: passing"}
             active={ciFilter !== "any"}
             onPress={() => setCiFilter((cur) => (cur === "any" ? "failing" : cur === "failing" ? "passing" : "any"))}
           />
-          <Chip
+          <FilterChip c={c}
             label={reviewFilter === "any" ? "Review: any" : REVIEW_LABEL[reviewFilter] || "Review: any"}
             active={reviewFilter !== "any"}
             onPress={() =>
@@ -203,7 +209,7 @@ export function Inbox({
               })
             }
           />
-          <Chip
+          <FilterChip c={c}
             label={sortLabels[sort]}
             active={false}
             onPress={() => setSort((cur) => sortOrder[(sortOrder.indexOf(cur) + 1) % sortOrder.length])}

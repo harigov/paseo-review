@@ -4,9 +4,10 @@ import { Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/r
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PrTabContext } from "../pr/tab-props";
 import { useJobRunner } from "../data/hooks";
-import { Markdown, extractRichHtmlBlock, stripRichHtmlBlock } from "../render/Markdown";
+import { Markdown } from "../render/Markdown";
 import { HtmlView } from "../render/HtmlView";
 import { agentTaskRpc } from "../../shared/rpc";
+import { extractRichHtml, stripRichHtml } from "../../shared/rich-html";
 
 const SEVERITY_LABELS: Record<number, string> = { 1: "Trivial", 2: "Minor", 3: "Moderate", 4: "Major", 5: "Critical" };
 
@@ -34,8 +35,8 @@ export function OverviewTab(props: PrTabContext) {
     return <Text style={{ padding: 16, color: c.foregroundMuted }}>Loading…</Text>;
   }
 
-  const richHtml = analysis?.richDescriptionHtml ?? extractRichHtmlBlock(detail.body);
-  const markdownBody = stripRichHtmlBlock(detail.body);
+  const richHtml = analysis?.richDescriptionHtml ?? extractRichHtml(detail.body);
+  const markdownBody = stripRichHtml(detail.body);
   const baseUrl = detail.summary.url;
 
   const totals = analysis?.totals;

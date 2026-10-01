@@ -1,18 +1,21 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { services } from "../core/services";
+import { collectGuidanceFiles } from "./guidance";
 import type { Repo } from "../../shared/types";
 
-// Minimal read-only MCP server (plan §8.2): a per-task HTTP JSON-RPC 2.0 endpoint on
-// 127.0.0.1:<random>, bearer-token gated, scoped to one repo + PR number. Agents reach it
-// through `config.mcpServers` + `config.toolPolicy.preapproved`. Best-effort: callers treat a
-// null return as "no toolset this time" and omit both fields from the agent config.
+// Read-only MCP toolset (plan §8.2). One HTTP JSON-RPC 2.0 server for the whole plugin
+// process, started lazily on first use and closed only when the plugin shuts down
+// (startBackground's cleanup) — not per task/chat. Each caller gets its own bearer token,
+// mapped server-side to the {repo, number} it may read. Task-session tokens are revoked when
+// the task ends; chat-session tokens persist and are reused per repo#number for as long as the
+// process lives, so the MCP server stays reachable for the whole live conversation, not just
+// the moment the chat agent is created.
 
-export interface McpHandle {
+export interface McpSession {
   url: string;
   token: string;
   toolNames: string[];
-  close(): Promise<void>;
 }
 
 interface ToolContext {
@@ -27,8 +30,8 @@ interface ToolDef {
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
 }
 
-const GUIDANCE_FILES = ["REVIEW.md", "AGENTS.md", "CLAUDE.md"];
 const MAX_DIFF_CHARS = 60_000;
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB — these are small JSON-RPC calls, not uploads.
 
 function buildTools(): ToolDef[] {
   return [
@@ -111,38 +114,73 @@ function buildTools(): ToolDef[] {
     },
     {
       name: "repo_guidance",
-      description: "Repo guidance files (REVIEW.md, AGENTS.md, CLAUDE.md) at the PR head, up to 4k chars each.",
+      description: "Repo guidance files (REVIEW.md, AGENTS.md, CLAUDE.md) from the repo root and the nearest ancestor of each touched directory, up to 4k chars each.",
       inputSchema: { type: "object", properties: {} },
       handler: async (_args, ctx) => {
-        const refs = await services.analysis.ensurePrRefs(ctx.repo, ctx.number);
+        const [refs, analysis] = await Promise.all([
+          services.analysis.ensurePrRefs(ctx.repo, ctx.number),
+          services.analysis.getAnalysis(ctx.repo, ctx.number),
+        ]);
+        const touchedPaths = analysis?.files.map((f) => f.path) ?? [];
+        const guidance = await collectGuidanceFiles(ctx.repo, refs.headSha, touchedPaths);
         const files: Record<string, string> = {};
-        for (const name of GUIDANCE_FILES) {
-          const content = await services.analysis.readFileAtRef(ctx.repo, refs.headSha, name).catch(() => null);
-          if (content) files[name] = content.slice(0, 4000);
-        }
+        for (const file of guidance) files[file.path] = file.content;
         return { files };
       },
     },
   ];
 }
 
-export async function startMcpServer(repo: Repo, number: number): Promise<McpHandle | null> {
-  const tools = buildTools();
-  const token = randomBytes(24).toString("hex");
-  const ctx: ToolContext = { repo: repo.slug, number };
+const TOOLS = buildTools();
+const TOOL_NAMES = TOOLS.map((t) => t.name);
 
-  return new Promise<McpHandle | null>((resolve) => {
-    let server: Server;
+type SessionKind = "task" | "chat";
+interface Session {
+  kind: SessionKind;
+  repo: string;
+  number: number;
+}
+
+const sessions = new Map<string, Session>(); // token -> session
+const chatTokensByKey = new Map<string, string>(); // "repo#number" -> token
+
+let server: Server | null = null;
+let serverUrl: string | null = null;
+let startPromise: Promise<string | null> | null = null;
+
+function chatKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
+async function ensureServerStarted(): Promise<string | null> {
+  if (serverUrl) return serverUrl;
+  if (startPromise) return startPromise;
+  startPromise = new Promise<string | null>((resolve) => {
+    let created: Server;
     try {
-      server = createServer((req, res) => {
+      created = createServer((req, res) => {
         if (req.method !== "POST") {
           res.writeHead(405).end();
           return;
         }
         const chunks: Buffer[] = [];
-        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        let size = 0;
+        let rejected = false;
+        req.on("data", (chunk: Buffer) => {
+          if (rejected) return;
+          size += chunk.length;
+          if (size > MAX_BODY_BYTES) {
+            rejected = true;
+            res.writeHead(413, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32011, message: "Request body too large" } }));
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
         req.on("end", () => {
-          void handleRequest(Buffer.concat(chunks).toString("utf8"), req.headers.authorization, token, tools, ctx, res);
+          if (rejected) return;
+          void handleRequest(Buffer.concat(chunks).toString("utf8"), req.headers.authorization, res);
         });
         req.on("error", () => res.writeHead(400).end());
       });
@@ -152,29 +190,74 @@ export async function startMcpServer(repo: Repo, number: number): Promise<McpHan
       return;
     }
 
-    server.on("error", (error) => {
+    created.on("error", (error) => {
       console.error("[pr-review] MCP server failed to start:", error);
       resolve(null);
     });
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
+    created.listen(0, "127.0.0.1", () => {
+      const address = created.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      resolve({
-        url: `http://127.0.0.1:${port}/mcp`,
-        token,
-        toolNames: tools.map((t) => t.name),
-        close: () => new Promise<void>((done) => server.close(() => done())),
-      });
+      server = created;
+      serverUrl = `http://127.0.0.1:${port}/mcp`;
+      resolve(serverUrl);
     });
   });
+  const url = await startPromise;
+  startPromise = null;
+  return url;
+}
+
+/**
+ * Opens a session for `{repo, number}` on the one long-lived MCP server, starting it if
+ * necessary. Chat sessions are looked up by repo#number and reused for as long as the process
+ * runs (so re-opening the same PR's chat keeps using the same token); task sessions always get
+ * a fresh token that the caller must revoke with `closeMcpSession` when the task finishes.
+ * Returns null when the server itself failed to start — callers treat that as "no toolset this
+ * time" and omit `mcpServers`/`toolPolicy` from the agent config.
+ */
+export async function openMcpSession(kind: SessionKind, repo: Repo, number: number): Promise<McpSession | null> {
+  const url = await ensureServerStarted();
+  if (!url) return null;
+
+  if (kind === "chat") {
+    const key = chatKey(repo.slug, number);
+    const existingToken = chatTokensByKey.get(key);
+    if (existingToken && sessions.has(existingToken)) {
+      return { url, token: existingToken, toolNames: TOOL_NAMES };
+    }
+    const token = randomBytes(24).toString("hex");
+    sessions.set(token, { kind, repo: repo.slug, number });
+    chatTokensByKey.set(key, token);
+    return { url, token, toolNames: TOOL_NAMES };
+  }
+
+  const token = randomBytes(24).toString("hex");
+  sessions.set(token, { kind, repo: repo.slug, number });
+  return { url, token, toolNames: TOOL_NAMES };
+}
+
+/** Revokes a task session's token. Chat tokens are intentionally left alone (they persist for
+ * the process lifetime); pass a chat token here is a no-op. */
+export function closeMcpSession(token: string): void {
+  const session = sessions.get(token);
+  if (!session || session.kind === "chat") return;
+  sessions.delete(token);
+}
+
+/** Closes the MCP server and drops all sessions. Called once, from startBackground's cleanup. */
+export async function closeMcpServer(): Promise<void> {
+  sessions.clear();
+  chatTokensByKey.clear();
+  const current = server;
+  server = null;
+  serverUrl = null;
+  if (!current) return;
+  await new Promise<void>((done) => current.close(() => done()));
 }
 
 async function handleRequest(
   raw: string,
   authorization: string | undefined,
-  token: string,
-  tools: ToolDef[],
-  ctx: ToolContext,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
   const respond = (status: number, body: unknown) => {
@@ -182,10 +265,13 @@ async function handleRequest(
     res.end(JSON.stringify(body));
   };
 
-  if (authorization !== `Bearer ${token}`) {
+  const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
+  const session = token ? sessions.get(token) : undefined;
+  if (!session) {
     respond(401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" } });
     return;
   }
+  const ctx: ToolContext = { repo: session.repo, number: session.number };
 
   let body: { id?: unknown; method?: string; params?: Record<string, unknown> };
   try {
@@ -224,14 +310,14 @@ async function handleRequest(
       respond(200, {
         jsonrpc: "2.0",
         id,
-        result: { tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) },
+        result: { tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) },
       });
       return;
     }
     if (method === "tools/call") {
       const name = body.params?.name;
       const args = (body.params?.arguments as Record<string, unknown>) ?? {};
-      const tool = tools.find((t) => t.name === name);
+      const tool = TOOLS.find((t) => t.name === name);
       if (!tool) {
         respond(200, { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool ${String(name)}` } });
         return;

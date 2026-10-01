@@ -1,3 +1,10 @@
+// DecisionService entry points below (`evaluate`, `classifyFiles`, `prSeverity`, `triageThreads`,
+// `substantiveChange`, `attention`) are repo-agnostic: they send whatever `state`/questions they
+// are given straight to the decision API with no idea which repo it came from. Per the plan,
+// sending code off-machine is a per-repo opt-in (`settings.decisionRepos`); it is the CALLER's
+// responsibility to check `decisionsEnabled`/`decisionRepos` for the relevant repo before
+// invoking any of these. See server/validators/index.ts's `validatorsTestRpc` and
+// `localValidateRpc` handlers for the gate this module itself can't enforce.
 import type { PrSummary, ThreadTriage } from "../../shared/types";
 import type {
   DecisionService,
@@ -63,8 +70,14 @@ const THREAD_TRIAGE_CRITERIA: Record<ThreadTriage, string> = {
   unclear: "It is unclear whether the comment is addressed",
 };
 
-/** Simple bounded-concurrency limiter; no deps. */
-function makeLimiter(concurrency: number) {
+/**
+ * Simple bounded-concurrency limiter; no deps. One instance is shared for the whole lifetime of
+ * a `DecisionService` (see `createDecisionService`) so `decision.concurrency` bounds the total
+ * number of in-flight requests across *all* decide entry points (classifyFiles, prSeverity,
+ * triageThreads, validator evaluation, …) — not just within a single `evaluate()` call.
+ */
+function makeLimiter(initialConcurrency: number) {
+  let concurrency = Math.max(1, initialConcurrency);
   let active = 0;
   const queue: Array<() => void> = [];
   function pump() {
@@ -73,25 +86,32 @@ function makeLimiter(concurrency: number) {
       if (next) next();
     }
   }
-  return function limit<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const run = () => {
-        active++;
-        fn()
-          .then(resolve, reject)
-          .finally(() => {
-            active--;
-            pump();
-          });
-      };
-      queue.push(run);
+  return {
+    setConcurrency(next: number) {
+      concurrency = Math.max(1, next);
       pump();
-    });
+    },
+    limit<T>(fn: () => Promise<T>): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        const run = () => {
+          active++;
+          fn()
+            .then(resolve, reject)
+            .finally(() => {
+              active--;
+              pump();
+            });
+        };
+        queue.push(run);
+        pump();
+      });
+    },
   };
 }
 
 export function createDecisionService(): DecisionService {
   const cache = new DecisionCache();
+  const limiter = makeLimiter(8);
 
   async function status() {
     const settings = await getSettings();
@@ -135,7 +155,17 @@ export function createDecisionService(): DecisionService {
         const unwrapped = unwrapResponse(config.provider, raw);
         inputTokens += unwrapped.usage?.input_tokens ?? 0;
         for (const [name, question] of chunk) {
-          const normalized = normalizeAnswer(unwrapped.answers?.[name], question.type);
+          const criteria = question.type === "score" ? question.criteria : undefined;
+          const normalized = normalizeAnswer(unwrapped.answers?.[name], question.type, criteria);
+          if (!normalized) {
+            // Malformed/unusable response for this one question: leave it unanswered (callers
+            // already treat a missing key as "unknown") rather than caching a guessed default
+            // that would look just as confident as a real answer forever.
+            console.error(
+              `[pr-review] decision model returned an unusable answer for question "${name}" (type ${question.type}); not caching it.`,
+            );
+            continue;
+          }
           answers[name] = normalized;
           cache.set(keys.get(name)!, normalized);
         }
@@ -153,8 +183,8 @@ export function createDecisionService(): DecisionService {
       const message = reason ?? "Decision model is not configured.";
       return requests.map(() => ({ error: message }));
     }
-    const limit = makeLimiter(config.concurrency);
-    return Promise.all(requests.map((request) => limit(() => evaluateOne(config, request))));
+    limiter.setConcurrency(config.concurrency);
+    return Promise.all(requests.map((request) => limiter.limit(() => evaluateOne(config, request))));
   }
 
   async function classifyFiles(inputs: FileClassificationInput[]): Promise<FileClassification[]> {

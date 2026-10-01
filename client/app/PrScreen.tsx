@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
-import { chatStartRpc, prAnalyzeRpc } from "../../shared/rpc";
+import { ChatStartResultSchema, chatStartRpc, prAnalyzeRpc } from "../../shared/rpc";
 import { prReviewSettings } from "../../shared/settings";
 import type { ReadingOrder } from "../../shared/types";
 import type { PrTabContext } from "../pr/tab-props";
+import { Dot, riskColor } from "../ui/chips";
 import { OverviewTab } from "./OverviewTab";
 import { VisualTab } from "./VisualTab";
 import { ModuleTab } from "../review/ModuleTab";
@@ -34,6 +35,7 @@ export function PrScreen(
   const prAnalyze = useRpc(prAnalyzeRpc);
   const chatStart = useRpc(chatStartRpc);
   const analyzeRunner = useJobRunner();
+  const chatRunner = useJobRunner();
   const triedHeadRef = useRef<string | null>(null);
 
   const [activeTab, setActiveTab] = useState("overview");
@@ -57,30 +59,66 @@ export function PrScreen(
     const stale = !analysis || analysis.headSha !== headSha;
     if (stale && triedHeadRef.current !== headSha && !analyzeRunner.running) {
       triedHeadRef.current = headSha;
-      void analyzeRunner.run(() => prAnalyze({ repo, number })).then(() => analysisQuery.refetch());
+      analyzeRunner
+        .run(() => prAnalyze({ repo, number }))
+        .then((job) => {
+          if (job.status === "error") toast.error(job.error ?? "Could not analyze this PR.");
+          return analysisQuery.refetch();
+        })
+        .catch((error) => {
+          toast.error(error instanceof Error ? error.message : "Could not analyze this PR.");
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.summary.headSha, analysis?.headSha, analyzeRunner.running]);
 
-  function refresh() {
+  const refresh = useCallback(() => {
     void detailQuery.refetch();
     void analysisQuery.refetch();
-  }
+  }, [detailQuery, analysisQuery]);
 
-  function reanalyze() {
+  const reanalyze = useCallback(() => {
     triedHeadRef.current = null;
-    void analyzeRunner.run(() => prAnalyze({ repo, number, force: true })).then(() => analysisQuery.refetch());
-  }
+    analyzeRunner
+      .run(() => prAnalyze({ repo, number, force: true }))
+      .then((job) => {
+        if (job.status === "error") {
+          toast.error(job.error ?? "Could not re-analyze this PR.");
+          return;
+        }
+        void detailQuery.refetch();
+        void analysisQuery.refetch();
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Could not re-analyze this PR.");
+      });
+  }, [analyzeRunner, prAnalyze, repo, number, detailQuery, analysisQuery, toast]);
 
-  async function openChat(seed?: string) {
-    toast.show("Starting the PR chat… this can take about 10s.", { variant: "info" });
-    try {
-      const result = await chatStart({ repo, number, seed });
-      navigation?.openAgent({ agentId: result.agentId });
-    } catch {
-      toast.error("Could not start chat.");
-    }
-  }
+  const openChat = useCallback(
+    async (seed?: string) => {
+      toast.show("Starting the PR chat… this can take about 10s.", { variant: "info" });
+      try {
+        const job = await chatRunner.run(() => chatStart({ repo, number, seed }));
+        if (job.status === "error") {
+          toast.error(job.error ?? "Could not start chat.");
+          return;
+        }
+        const parsed = ChatStartResultSchema.safeParse(job.result);
+        if (!parsed.success) {
+          toast.error("Chat did not return a valid result.");
+          return;
+        }
+        if (!navigation?.openAgent) {
+          toast.error("Chat needs a newer Paseo host.");
+          return;
+        }
+        navigation.openAgent({ agentId: parsed.data.agentId });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not start chat.");
+      }
+    },
+    [chatRunner, chatStart, repo, number, navigation, toast],
+  );
 
   const ctx: PrTabContext = useMemo(
     () => ({
@@ -94,10 +132,11 @@ export function PrScreen(
       readingOrder,
       sinceLastReview,
       refresh,
+      reanalyze,
       openChat,
       openTab: setActiveTab,
     }),
-    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview],
+    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, refresh, reanalyze, openChat],
   );
 
   const moduleTabs = useMemo(() => {
@@ -118,7 +157,7 @@ export function PrScreen(
     ...moduleTabs.map((m) => ({
       id: `module:${m.id}`,
       label: `${m.title} (${m.viewedFiles}/${m.fileCount})`,
-      riskColor: m.maxRisk !== null && m.maxRisk >= 4 ? c.statusDanger : m.maxRisk !== null && m.maxRisk >= 2 ? c.statusWarning : c.statusSuccess,
+      riskColor: riskColor(m.maxRisk, c),
     })),
     { id: "validators", label: "Validators", badge: validatorFailCount > 0 ? String(validatorFailCount) : undefined },
     { id: "conversations", label: "Conversations", badge: unresolvedThreads > 0 ? String(unresolvedThreads) : undefined },
@@ -178,7 +217,7 @@ export function PrScreen(
               backgroundColor: activeTab === tab.id ? c.surface2 : pressed ? c.surface1 : "transparent",
             })}
           >
-            {tab.riskColor && <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: tab.riskColor }} />}
+            {tab.riskColor && <Dot color={tab.riskColor} />}
             <Text numberOfLines={1} style={{ color: activeTab === tab.id ? c.foreground : c.foregroundMuted, fontSize: 13 }}>
               {tab.label}
             </Text>
@@ -251,10 +290,16 @@ export function PrScreen(
           <View style={{ flex: 1 }} />
           <ReviewSubmitButton {...ctx} />
         </View>
-        {analyzeRunner.running && (
+        {analyzeRunner.running ? (
           <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
             Analyzing… {analyzeRunner.job?.stage ?? ""} {analyzeRunner.job ? `${Math.round(analyzeRunner.job.progress * 100)}%` : ""}
           </Text>
+        ) : (
+          analyzeRunner.job?.status === "error" && (
+            <Text style={{ color: c.statusDanger, fontSize: 11 }}>
+              Analysis failed: {analyzeRunner.job.error ?? "unknown error"}. Try "Re-analyze".
+            </Text>
+          )
         )}
       </View>
       <View style={{ flex: 1, flexDirection: layout.compact ? "column" : "row" }}>

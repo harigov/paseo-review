@@ -36,11 +36,18 @@ afterEach(() => {
   useProvider("openrouter");
 });
 
+const FIVE_LEVELS = ["L0: trivial", "L1: low", "L2: moderate", "L3: high", "L4: critical"];
+
 describe("normalizeAnswer", () => {
   it("normalizes a noul answer and clamps out-of-range values", () => {
     expect(normalizeAnswer({ noul: 0.73 }, "noul")).toEqual({ type: "noul", noul: 0.73 });
     expect(normalizeAnswer({ noul: 4 }, "noul")).toEqual({ type: "noul", noul: 1 });
-    expect(normalizeAnswer(undefined, "noul")).toEqual({ type: "noul", noul: 0 });
+  });
+
+  it("returns null (not a guessed default) for a malformed/missing noul answer, so it is never cached as a false confident 0", () => {
+    expect(normalizeAnswer(undefined, "noul")).toBeNull();
+    expect(normalizeAnswer({}, "noul")).toBeNull();
+    expect(normalizeAnswer({ foo: "bar" }, "noul")).toBeNull();
   });
 
   it("normalizes a choice answer", () => {
@@ -53,36 +60,83 @@ describe("normalizeAnswer", () => {
     });
   });
 
-  it("normalizes a score answer", () => {
-    const answer = normalizeAnswer({ score: 2.4, probabilities: { "0": 0.1, "1": 0.2, "2": 0.5, "3": 0.1, "4": 0.1 } }, "score");
-    expect(answer.type).toBe("score");
-    expect((answer as { score: number }).score).toBe(2.4);
+  it("returns null for a malformed/missing choice answer (missing choice or probabilities)", () => {
+    expect(normalizeAnswer(undefined, "choice")).toBeNull();
+    expect(normalizeAnswer({ choice: "" }, "choice")).toBeNull();
+    expect(normalizeAnswer({ choice: "violation" }, "choice")).toBeNull();
+  });
+
+  it("returns null for a malformed/missing score answer", () => {
+    expect(normalizeAnswer(undefined, "score", FIVE_LEVELS)).toBeNull();
+    expect(normalizeAnswer({ probabilities: {} }, "score", FIVE_LEVELS)).toBeNull();
+  });
+
+  it("maps a 0-indexed numeric-keyed score answer onto 1..N criteria positions (documented fallback assumption)", () => {
+    const answer = normalizeAnswer(
+      { score: 2, probabilities: { "0": 0.1, "1": 0.2, "2": 0.4, "3": 0.2, "4": 0.1 } },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      // Re-keyed to canonical "1".."5"; weighted average = 1*.1+2*.2+3*.4+4*.2+5*.1 = 3.0
+      expect(answer.probabilities).toEqual({ "1": 0.1, "2": 0.2, "3": 0.4, "4": 0.2, "5": 0.1 });
+      expect(answer.score).toBeCloseTo(3.0);
+    }
+  });
+
+  it("maps a 1-indexed numeric-keyed score answer onto 1..N criteria positions as-is", () => {
+    const answer = normalizeAnswer(
+      { score: 4, probabilities: { "1": 0.1, "2": 0.1, "3": 0.1, "4": 0.6, "5": 0.1 } },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      expect(answer.probabilities).toEqual({ "1": 0.1, "2": 0.1, "3": 0.1, "4": 0.6, "5": 0.1 });
+    }
+  });
+
+  it("prefers a legend (key -> level text) over numeric-key guessing when both are present", () => {
+    // Legend says key "9" is actually our 3rd level ("L2: moderate"), contradicting what a
+    // naive numeric sort would assume -- the legend must win.
+    const answer = normalizeAnswer(
+      {
+        score: 9,
+        probabilities: { "9": 1 },
+        legend: { "9": "L2: moderate" },
+      },
+      "score",
+      FIVE_LEVELS,
+    );
+    expect(answer?.type).toBe("score");
+    if (answer?.type === "score") {
+      expect(answer.probabilities).toEqual({ "3": 1 });
+      expect(answer.score).toBe(3);
+    }
+  });
+
+  it("returns null (rather than trusting object insertion order) for non-numeric keys with no usable legend", () => {
+    expect(
+      normalizeAnswer({ score: 1, probabilities: { feature: 0.6, fix: 0.4 } }, "score", FIVE_LEVELS),
+    ).toBeNull();
   });
 });
 
 describe("scoreTo1to5", () => {
-  it("shifts a 0-indexed score into the 1..5 range", () => {
-    const value = scoreTo1to5({ score: 2, probabilities: { "0": 0.1, "1": 0.2, "2": 0.4, "3": 0.2, "4": 0.1 } });
-    expect(value).toBe(3);
-  });
-
-  it("leaves a 1-indexed score as-is", () => {
-    const value = scoreTo1to5({ score: 4, probabilities: { "1": 0.1, "2": 0.2, "3": 0.2, "4": 0.4, "5": 0.1 } });
-    expect(value).toBe(4);
-  });
-
-  it("clamps to the 1..5 range", () => {
+  it("clamps an already-normalized score to the 1..5 range", () => {
     expect(scoreTo1to5({ score: -3, probabilities: {} })).toBe(1);
     expect(scoreTo1to5({ score: 99, probabilities: {} })).toBe(5);
+    expect(scoreTo1to5({ score: 3.4, probabilities: {} })).toBeCloseTo(3.4);
   });
 });
 
 describe("probsToOrderedArray", () => {
-  it("orders numeric-keyed probabilities ascending", () => {
+  it("orders numeric-keyed probabilities ascending (the shape normalizeAnswer always produces for score answers)", () => {
     expect(probsToOrderedArray({ "2": 0.1, "0": 0.5, "1": 0.4 })).toEqual([0.5, 0.4, 0.1]);
   });
 
-  it("falls back to insertion order for non-numeric keys", () => {
+  it("falls back to plain insertion order for non-numeric keys (legacy/defensive path only)", () => {
     expect(probsToOrderedArray({ feature: 0.6, fix: 0.4 })).toEqual([0.6, 0.4]);
   });
 });
@@ -213,6 +267,51 @@ describe("createDecisionService", () => {
       { state: { path: "failing-case.ts" }, questions: { noise: { type: "noul", instructions: "mechanical?" } } },
     ]);
     expect("error" in res).toBe(true);
+  });
+
+  it("omits a malformed/unusable answer instead of caching a guessed default (D5)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ success: true, errors: [], result: { answers: { noise: {} }, usage: { input_tokens: 1 } } }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const service = createDecisionService();
+    const [res] = await service.evaluate([
+      { state: { path: "d5-malformed-test.ts" }, questions: { noise: { type: "noul", instructions: "mechanical?" } } },
+    ]);
+    expect("error" in res).toBe(false);
+    if (!("error" in res)) expect(res.answers.noise).toBeUndefined();
+  });
+
+  it("shares one concurrency limiter across separate evaluate() calls, not one per call (D7)", async () => {
+    useProvider("cloudflare", { concurrency: 1 });
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acct123";
+    process.env.CLOUDFLARE_API_TOKEN = "token123";
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchMock = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight--;
+      return new Response(
+        JSON.stringify({ success: true, errors: [], result: { answers: { noise: { type: "noul", noul: 0.1 } }, usage: {} } }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = createDecisionService();
+    await Promise.all([
+      service.evaluate([{ state: { path: "a.ts" }, questions: { noise: { type: "noul", instructions: "x" } } }]),
+      service.evaluate([{ state: { path: "b.ts" }, questions: { noise: { type: "noul", instructions: "x" } } }]),
+    ]);
+    expect(maxInFlight).toBe(1);
   });
 
   it("classifyFiles degrades to nulls when not configured", async () => {

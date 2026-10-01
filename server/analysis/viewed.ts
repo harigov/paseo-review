@@ -1,7 +1,7 @@
 import { services } from "../core/services";
 import { getLocalViewedRecords } from "../github/viewed-store";
 import type { PrDetail, ViewedState } from "../../shared/types";
-import { gitAt, mergeBase as computeMergeBase, nameOnlyDiff, patchId, rawDiff } from "./git";
+import { fetchSha, mergeBase as computeMergeBase, nameOnlyDiff, objectExists, patchId, rawDiff } from "./git";
 
 export { getLocalViewedRecords };
 
@@ -35,16 +35,28 @@ export async function computeViewedFields(
   const viewedByPath = new Map<string, ViewedState>();
   for (const f of detail.files) viewedByPath.set(f.path, f.viewed);
 
+  // A9: fail OPEN, not closed. If the anchor commit can't be fetched/resolved (force-pushed
+  // away and since GC'd, a transient network error, anything), the old code silently treated
+  // every file as "0 changed since your last review" — the worst failure mode for a
+  // review-safety feature. On failure we instead mark every file as changed and report the
+  // anchor as unresolved (null) rather than claim a (possibly false) all-clear.
   const anchor = detail.myLastReviewSha;
   let changedPaths = new Set<string>();
   let anchorMergeBase: string | null = null;
+  let anchorResolved = false;
   if (anchor) {
-    try {
-      await gitAt(mirror, ["fetch", "origin", anchor], { allowFailure: true, timeoutMs: 30_000 });
-      changedPaths = new Set(await nameOnlyDiff(mirror, anchor, headSha));
-      anchorMergeBase = await computeMergeBase(mirror, baseSha, anchor, baseRef);
-    } catch {
-      changedPaths = new Set();
+    await fetchSha(mirror, anchor, 30_000);
+    if (await objectExists(mirror, anchor)) {
+      try {
+        changedPaths = new Set(await nameOnlyDiff(mirror, anchor, headSha));
+        anchorMergeBase = await computeMergeBase(mirror, baseSha, anchor, baseRef);
+        anchorResolved = true;
+      } catch {
+        anchorResolved = false;
+      }
+    }
+    if (!anchorResolved) {
+      console.warn(`[pr-review] since-last-review anchor ${anchor} could not be resolved; failing open (treating all files as changed)`);
     }
   }
 
@@ -61,7 +73,7 @@ export async function computeViewedFields(
   const perFile = new Map<string, ViewedFileFields>();
   for (const file of detail.files) {
     const viewed = viewedByPath.get(file.path) ?? "UNVIEWED";
-    let changedSinceLastReview = anchor ? changedPaths.has(file.path) : false;
+    let changedSinceLastReview = anchor ? (anchorResolved ? changedPaths.has(file.path) : true) : false;
     let rebaseOnly = false;
 
     if (anchor && anchorMergeBase && changedSinceLastReview) {
@@ -98,5 +110,5 @@ export async function computeViewedFields(
     perFile.set(file.path, { viewed, changedSinceLastReview, rebaseOnly, changedSinceViewedProbability });
   }
 
-  return { sinceAnchorSha: anchor, perFile };
+  return { sinceAnchorSha: anchor && anchorResolved ? anchor : null, perFile };
 }

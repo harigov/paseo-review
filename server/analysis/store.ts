@@ -1,40 +1,43 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { dataDir } from "../core/paths";
+import { dataDir, repoDataFile } from "../core/paths";
 import type { Analysis } from "../../shared/types";
 
-function analysisFilePath(owner: string, name: string, number: number): string {
-  return path.join(dataDir("analysis"), `${owner}__${name}__${number}.json`);
-}
-
-export function loadAnalysis(owner: string, name: string, number: number): Analysis | null {
+export function loadAnalysis(repo: string, number: number): Analysis | null {
   try {
-    const raw = readFileSync(analysisFilePath(owner, name, number), "utf8");
+    const raw = readFileSync(repoDataFile(dataDir("analysis"), repo, number), "utf8");
     return JSON.parse(raw) as Analysis;
   } catch {
     return null;
   }
 }
 
-export function saveAnalysis(owner: string, name: string, number: number, analysis: Analysis): void {
-  writeFileSync(analysisFilePath(owner, name, number), JSON.stringify(analysis));
-}
-
-function overridesFilePath(owner: string, name: string, number: number): string {
-  return path.join(dataDir("overrides"), `${owner}__${name}__${number}.json`);
-}
-
-export function loadOverrides(owner: string, name: string, number: number): Record<string, string> {
+/**
+ * X12: refuse to overwrite a newer analysis. Two forced re-analyses can race (join-dedup is
+ * skipped for `force`), and a slow job can finish after a newer one already completed — in
+ * either case the later write would otherwise clobber fresher data with stale data.
+ */
+export function saveAnalysis(repo: string, number: number, analysis: Analysis): void {
+  const file = repoDataFile(dataDir("analysis"), repo, number);
   try {
-    const raw = readFileSync(overridesFilePath(owner, name, number), "utf8");
+    const existing = JSON.parse(readFileSync(file, "utf8")) as Analysis;
+    if (existing.analyzedAt && analysis.analyzedAt && existing.analyzedAt > analysis.analyzedAt) return;
+  } catch {
+    // no existing (or unreadable) analysis — proceed with the write
+  }
+  writeFileSync(file, JSON.stringify(analysis));
+}
+
+export function loadOverrides(repo: string, number: number): Record<string, string> {
+  try {
+    const raw = readFileSync(repoDataFile(dataDir("overrides"), repo, number), "utf8");
     return JSON.parse(raw) as Record<string, string>;
   } catch {
     return {};
   }
 }
 
-export function saveOverride(owner: string, name: string, number: number, filePath: string, moduleId: string): void {
-  const current = loadOverrides(owner, name, number);
+export function saveOverride(repo: string, number: number, filePath: string, moduleId: string): void {
+  const current = loadOverrides(repo, number);
   current[filePath] = moduleId;
-  writeFileSync(overridesFilePath(owner, name, number), JSON.stringify(current));
+  writeFileSync(repoDataFile(dataDir("overrides"), repo, number), JSON.stringify(current));
 }

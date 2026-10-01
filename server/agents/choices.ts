@@ -27,6 +27,10 @@ function extractProfiles(config: unknown): RawAgentProfile[] {
   return [];
 }
 
+/** Modes exposed by each provider family, cached from the last `providers.snapshot()` call so
+ * `readOnlyModeFor` doesn't need a second round trip for the common case. Best-effort only. */
+const modesCache = new Map<string, Array<{ id: string; label: string }>>();
+
 export async function listAgentChoices(paseo: PaseoApi): Promise<AgentChoice[]> {
   const choices: AgentChoice[] = [];
 
@@ -49,6 +53,7 @@ export async function listAgentChoices(paseo: PaseoApi): Promise<AgentChoice[]> 
   try {
     const snapshot = await paseo.providers.snapshot();
     for (const entry of snapshot.entries ?? []) {
+      if (entry.modes?.length) modesCache.set(entry.provider.toLowerCase(), entry.modes);
       if (entry.status !== "ready" || entry.enabled === false) continue;
       for (const model of (entry.models ?? []).slice(0, 2)) {
         choices.push({
@@ -94,15 +99,40 @@ export async function pickDefaultChoice(
   return choices.find((choice) => choice.kind === "profile") ?? choices[0];
 }
 
-const READ_ONLY_MODE_BY_PROVIDER: Record<string, string> = {
-  claude: "plan",
-  cursor: "ask",
-  opencode: "plan",
-  codex: "read-only",
-};
+/** Candidate id/label fragments for a restricted, non-destructive mode, checked in order. */
+const READ_ONLY_MODE_CANDIDATES = ["plan", "ask", "read-only", "readonly", "read only", "review"];
 
-/** Best-effort read-only mode per provider family. Callers should omit modeId when this returns null. */
-export function readOnlyModeFor(provider: string): string | null {
+/** Picks the first mode (by id or label, case-insensitively) that looks read-only. Returns
+ * null when the list is empty/unknown so callers omit `modeId` rather than guess. */
+export function pickReadOnlyMode(modes: Array<{ id: string; label: string }> | null | undefined): string | null {
+  if (!modes?.length) return null;
+  for (const candidate of READ_ONLY_MODE_CANDIDATES) {
+    const match = modes.find((m) => m.id.toLowerCase() === candidate || m.label.toLowerCase() === candidate);
+    if (match) return match.id;
+  }
+  return null;
+}
+
+/**
+ * Read-only mode id for a provider, derived from the provider's *actual* available modes
+ * (from `providers.snapshot()`), not a hardcoded per-provider guess. Falls back to a fresh
+ * snapshot call when the family isn't in `modesCache` yet. Callers should omit `modeId` when
+ * this resolves to null rather than pass an unrecognized mode id.
+ */
+export async function readOnlyModeFor(paseo: PaseoApi, provider: string): Promise<string | null> {
   const family = provider.split("/")[0]?.toLowerCase() ?? "";
-  return READ_ONLY_MODE_BY_PROVIDER[family] ?? null;
+  if (!family) return null;
+  let modes = modesCache.get(family);
+  if (!modes) {
+    try {
+      const snapshot = await paseo.providers.snapshot();
+      for (const entry of snapshot.entries ?? []) {
+        if (entry.modes?.length) modesCache.set(entry.provider.toLowerCase(), entry.modes);
+      }
+      modes = modesCache.get(family);
+    } catch (error) {
+      console.error("[pr-review] providers.snapshot() failed while resolving a read-only mode:", error);
+    }
+  }
+  return pickReadOnlyMode(modes);
 }

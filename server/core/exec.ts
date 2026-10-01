@@ -16,6 +16,8 @@ export interface RunResult {
   stderr: string;
   code: number;
   truncated: boolean;
+  /** True when the process was killed because it exceeded `timeoutMs`. */
+  timedOut: boolean;
 }
 
 const FALLBACK_DIRS = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/snap/bin"];
@@ -69,6 +71,12 @@ export function run(
     const err: Buffer[] = [];
     let outBytes = 0;
     let truncated = false;
+    let timedOut = false;
+    // A child that exits (or never reads stdin) before we finish writing makes `child.stdin`
+    // emit an unlistened 'error' (EPIPE) on write, which otherwise crashes the whole process.
+    child.stdin.on("error", () => {
+      // Surfaced via the exit code / stderr instead; nothing to do here.
+    });
     child.stdout.on("data", (chunk: Buffer) => {
       if (outBytes >= maxBuffer) {
         truncated = true;
@@ -79,7 +87,10 @@ export function run(
     });
     child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
     const timer = options.timeoutMs
-      ? setTimeout(() => child.kill("SIGKILL"), options.timeoutMs)
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, options.timeoutMs)
       : null;
     child.on("error", (error) => {
       if (timer) clearTimeout(timer);
@@ -92,19 +103,22 @@ export function run(
         stderr: Buffer.concat(err).toString("utf8"),
         code: code ?? -1,
         truncated,
+        timedOut,
       };
       if (result.code !== 0 && !options.allowFailure) {
-        reject(
-          new CommandError(
-            `${command} ${args.slice(0, 3).join(" ")} failed (${result.code}): ${result.stderr.trim().slice(0, 500)}`,
-            result,
-          ),
-        );
+        const reason = timedOut
+          ? `timed out after ${options.timeoutMs}ms`
+          : `failed (${result.code}): ${result.stderr.trim().slice(0, 500)}`;
+        reject(new CommandError(`${command} ${args.slice(0, 3).join(" ")} ${reason}`, result));
         return;
       }
       resolve(result);
     });
-    if (options.input !== undefined) child.stdin.end(options.input);
-    else child.stdin.end();
+    try {
+      if (options.input !== undefined) child.stdin.end(options.input);
+      else child.stdin.end();
+    } catch {
+      // Already handled by the 'error' listener above.
+    }
   });
 }

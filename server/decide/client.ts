@@ -190,48 +190,120 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** Normalizes one raw provider answer into our typed shape, given the question type we asked. */
-export function normalizeAnswer(raw: unknown, questionType: SystemOneQuestion["type"]): SystemOneAnswer {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  if (questionType === "noul") {
-    const value = typeof r.noul === "number" ? r.noul : typeof r.probability === "number" ? r.probability : 0;
-    return { type: "noul", noul: clamp(value, 0, 1) };
+/**
+ * Resolves a score answer's `probabilities` keys onto our 1..N `criteria` positions, without
+ * ever trusting plain object key insertion order (not a guarantee through JSON/HTTP transport).
+ * Priority:
+ *   1. The provider's own `legend`, if present — documented as a map from the same keys used
+ *      in `probabilities` to the literal level text we sent in `criteria`. We match each
+ *      legend value against `criteria` by exact text.
+ *   2. Purely numeric probability keys, sorted ascending, assumed aligned to `criteria` order;
+ *      0- vs 1-indexing is detected from the minimum key. This is a documented *assumption*,
+ *      not verified against a live System One endpoint (no API key is available here).
+ * Returns null when neither strategy yields a full mapping, so the caller treats the answer as
+ * unusable rather than guessing from insertion order.
+ */
+function mapScoreKeysToLevels(
+  probabilities: Record<string, number>,
+  legend: unknown,
+  criteria: string[],
+): Map<string, number> | null {
+  const keys = Object.keys(probabilities);
+  if (keys.length === 0) return null;
+
+  if (legend && typeof legend === "object" && !Array.isArray(legend) && criteria.length > 0) {
+    const map = new Map<string, number>();
+    let ok = true;
+    for (const key of keys) {
+      const text = (legend as Record<string, unknown>)[key];
+      const idx = typeof text === "string" ? criteria.indexOf(text) : -1;
+      if (idx < 0) {
+        ok = false;
+        break;
+      }
+      map.set(key, idx + 1);
+    }
+    if (ok) return map;
   }
-  if (questionType === "choice") {
-    const probabilities =
-      r.probabilities && typeof r.probabilities === "object" ? (r.probabilities as Record<string, number>) : {};
-    return {
-      type: "choice",
-      choice: typeof r.choice === "string" ? r.choice : "",
-      probabilities,
-      confidence: typeof r.confidence === "number" ? r.confidence : 0,
-    };
+
+  if (keys.every((k) => /^\d+$/.test(k))) {
+    const nums = keys.map(Number).sort((a, b) => a - b);
+    const zeroIndexed = nums[0] === 0;
+    const map = new Map<string, number>();
+    for (const n of nums) map.set(String(n), zeroIndexed ? n + 1 : n);
+    return map;
   }
-  const probabilities =
-    r.probabilities && typeof r.probabilities === "object" ? (r.probabilities as Record<string, number>) : {};
-  return {
-    type: "score",
-    score: typeof r.score === "number" ? r.score : 0,
-    probabilities,
-    confidence: typeof r.confidence === "number" ? r.confidence : 0,
-  };
+
+  // No legend and non-numeric keys: refuse to guess from object insertion order.
+  return null;
 }
 
 /**
- * Maps a normalized score answer to our 1..5 scale. Score questions are posed with 5 ordered
- * levels; if the provider's probability keys are 0-indexed ("0".."4") the weighted score is
- * 0-indexed too, so we shift it. Falls back to clamping the raw score when keys aren't numeric.
+ * Normalizes one raw provider answer into our typed shape, given the question type we asked.
+ * Returns null when the raw answer is missing the fields required for that question type (or,
+ * for "score", when its probability keys can't be reliably mapped onto `criteria` — see
+ * `mapScoreKeysToLevels`). Callers must NOT cache or otherwise treat a null result as a real
+ * answer: it signals "the provider's response was unusable", not "the answer was no/0/empty".
  */
-export function scoreTo1to5(answer: { score: number; probabilities: Record<string, number> }): number {
-  const keys = Object.keys(answer.probabilities)
-    .map(Number)
-    .filter((n) => Number.isFinite(n));
-  const zeroIndexed = keys.length > 0 && Math.min(...keys) === 0;
-  const adjusted = zeroIndexed ? answer.score + 1 : answer.score;
-  return clamp(adjusted, 1, 5);
+export function normalizeAnswer(
+  raw: unknown,
+  questionType: SystemOneQuestion["type"],
+  criteria?: SystemOneQuestion["criteria"],
+): SystemOneAnswer | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (questionType === "noul") {
+    const value = typeof r.noul === "number" ? r.noul : typeof r.probability === "number" ? r.probability : null;
+    if (value === null) return null;
+    return { type: "noul", noul: clamp(value, 0, 1) };
+  }
+  if (questionType === "choice") {
+    if (typeof r.choice !== "string" || !r.choice) return null;
+    if (!r.probabilities || typeof r.probabilities !== "object") return null;
+    return {
+      type: "choice",
+      choice: r.choice,
+      probabilities: r.probabilities as Record<string, number>,
+      confidence: typeof r.confidence === "number" ? r.confidence : 0,
+    };
+  }
+
+  // score
+  if (typeof r.score !== "number") return null;
+  const rawProbs = r.probabilities && typeof r.probabilities === "object" ? (r.probabilities as Record<string, number>) : null;
+  if (!rawProbs || Object.keys(rawProbs).length === 0) return null;
+  const levels = Array.isArray(criteria) ? (criteria as string[]) : [];
+  const levelMap = mapScoreKeysToLevels(rawProbs, r.legend, levels);
+  if (!levelMap) return null;
+
+  // Re-key probabilities to canonical "1".."N" strings aligned with `criteria` order, and
+  // derive `score` as the weighted average over those canonical indices. This sidesteps ever
+  // needing to guess whether the provider's own raw `score` field used the same indexing as
+  // its probability keys.
+  const probabilities: Record<string, number> = {};
+  let weighted = 0;
+  for (const [rawKey, idx1] of levelMap) {
+    const p = rawProbs[rawKey] ?? 0;
+    probabilities[String(idx1)] = p;
+    weighted += idx1 * p;
+  }
+  return { type: "score", score: weighted, probabilities, confidence: typeof r.confidence === "number" ? r.confidence : 0 };
 }
 
-/** Best-effort ordering of a probability map into an array matching level order. */
+/**
+ * Clamps an already-normalized score answer to our 1..5 scale. By the time an answer reaches
+ * here, `normalizeAnswer` has already resolved provider-specific indexing via `criteria`/
+ * `legend`, so this is just a safety clamp (fractional weighted-average scores are expected).
+ */
+export function scoreTo1to5(answer: { score: number; probabilities: Record<string, number> }): number {
+  return clamp(answer.score, 1, 5);
+}
+
+/**
+ * Best-effort ordering of a probability map into an array matching level order. Safe to trust
+ * for our own score answers post-`normalizeAnswer`, since those are always re-keyed to
+ * canonical "1".."N" strings. The non-numeric fallback below only exists for robustness against
+ * arbitrary/legacy maps and is NOT given any special trust — it is plain insertion order.
+ */
 export function probsToOrderedArray(probabilities: Record<string, number>): number[] {
   const keys = Object.keys(probabilities);
   const numeric = keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
@@ -244,7 +316,11 @@ export function probsToOrderedArray(probabilities: Record<string, number>): numb
   return Object.values(probabilities);
 }
 
-/** Cache key for one (model, state, question) triple. */
+/**
+ * Cache key for one (model, state, question) triple. Hashes a single JSON-serialized tuple
+ * (rather than concatenating separately-stringified parts with no delimiter) so there's no
+ * boundary ambiguity between the three fields.
+ */
 export function cacheKey(model: string, state: unknown, question: SystemOneQuestion): string {
-  return createHash("sha256").update(model).update(JSON.stringify(state)).update(JSON.stringify(question)).digest("hex");
+  return createHash("sha256").update(JSON.stringify([model, state, question])).digest("hex");
 }

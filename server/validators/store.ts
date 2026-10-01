@@ -1,11 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { dataDir } from "../core/paths";
-
-function slugFileName(repo: string): string {
-  const [owner, name] = repo.split("/");
-  return `${owner || "unknown"}__${name || repo || "unknown"}`;
-}
+import { dataDir, repoDataFile } from "../core/paths";
 
 function readJson<T>(file: string, fallback: T): T {
   if (!existsSync(file)) return fallback;
@@ -18,17 +12,17 @@ function readJson<T>(file: string, fallback: T): T {
 
 /** Per-repo enable/disable overrides, keyed by validator id. Default (absent) = enabled. */
 export function readEnabledState(repo: string): Record<string, boolean> {
-  const file = path.join(dataDir("validator-state"), `${slugFileName(repo)}.json`);
+  const file = repoDataFile(dataDir("validator-state"), repo);
   return readJson<Record<string, boolean>>(file, {});
 }
 
 export function writeEnabledState(repo: string, state: Record<string, boolean>): void {
-  const file = path.join(dataDir("validator-state"), `${slugFileName(repo)}.json`);
+  const file = repoDataFile(dataDir("validator-state"), repo);
   writeFileSync(file, JSON.stringify(state, null, 2));
 }
 
 function dismissalFile(repo: string, number: number): string {
-  return path.join(dataDir("dismissals"), `${slugFileName(repo)}__${number}.json`);
+  return repoDataFile(dataDir("dismissals"), repo, number);
 }
 
 /** Set of "validatorId::unitKey" dismissed finding keys for one PR. */

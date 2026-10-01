@@ -41,7 +41,20 @@ const server = {
 };
 const paseo = {
   projects: {
-    list: async () => ({ entries: [{ projectId: "prj_smoke", name: path.basename(projectPath), displayName: path.basename(projectPath), kind: "git", path: projectPath, rootPath: projectPath }], projects: [{ projectId: "prj_smoke", name: path.basename(projectPath), kind: "git", path: projectPath, rootPath: projectPath }] }),
+    // Shape matches ProjectListResponseMessage.payload from @getpaseo/protocol (the real,
+    // currently-installed SDK contract) — projectKind/projectRootPath/projectDisplayName/
+    // projectId, not the speculative legacy names `fetchRepos()` also tolerates as a fallback.
+    list: async () => ({
+      requestId: "req_smoke",
+      projects: [
+        {
+          projectId: "prj_smoke",
+          projectDisplayName: path.basename(projectPath),
+          projectRootPath: projectPath,
+          projectKind: "git",
+        },
+      ],
+    }),
   },
   config: { get: async () => ({ config: { daemon: { agentProfiles: [] } } }) },
   providers: { snapshot: async () => ({ entries: [] }) },

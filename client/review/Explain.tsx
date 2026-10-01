@@ -3,6 +3,7 @@ import { Pressable, Text, View } from "react-native";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
+import { z } from "zod";
 import { agentTaskRpc } from "../../shared/rpc";
 import { useJobRunner } from "../data/hooks";
 
@@ -11,13 +12,15 @@ export interface ExplainResult {
   suggestedFix: string | null;
 }
 
+const ExplainResultSchema = z.object({
+  explanation: z.string(),
+  suggestedFix: z.string().nullable().optional(),
+});
+
 function parseExplainResult(raw: unknown): ExplainResult | null {
-  if (!raw || typeof raw !== "object") return null;
-  const value = raw as Record<string, unknown>;
-  const explanation = typeof value.explanation === "string" ? value.explanation : null;
-  if (explanation === null) return null;
-  const suggestedFix = typeof value.suggestedFix === "string" ? value.suggestedFix : null;
-  return { explanation, suggestedFix };
+  const parsed = ExplainResultSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return { explanation: parsed.data.explanation, suggestedFix: parsed.data.suggestedFix ?? null };
 }
 
 /** "Explain" button: runs a read-only agent task and shows the result in a modal. */

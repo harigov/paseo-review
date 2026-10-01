@@ -15,7 +15,9 @@ import {
 
 // Every RPC finishes well under the daemon's 30 s cap. Long work starts a job and is polled.
 
-const PrRef = z.object({ repo: z.string(), number: z.number() });
+/** "owner/name" — validated so it can never smuggle path segments into file names or API paths. */
+export const RepoSlugSchema = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "Expected owner/name");
+const PrRef = z.object({ repo: RepoSlugSchema, number: z.number().int().positive() });
 const Ok = z.object({ ok: z.boolean(), message: z.string().nullable() });
 
 // ---------- repos & inbox (server/github) ----------
@@ -107,20 +109,21 @@ export const fileMoveRpc = defineRpc({
 
 export const validatorsListRpc = defineRpc({
   name: "prr.validators.list",
-  input: z.object({ repo: z.string() }),
+  input: z.object({ repo: RepoSlugSchema }),
   output: z.object({ validators: z.array(ValidatorSchema), errors: z.array(z.string()) }),
 });
 
 export const validatorsToggleRpc = defineRpc({
   name: "prr.validators.toggle",
-  input: z.object({ repo: z.string(), validatorId: z.string(), enabled: z.boolean() }),
+  input: z.object({ repo: RepoSlugSchema, validatorId: z.string(), enabled: z.boolean() }),
   output: Ok,
 });
 
 export const validatorsTestRpc = defineRpc({
   name: "prr.validators.test",
   input: PrRef.extend({ markdown: z.string() }),
-  output: z.object({ result: ValidatorResultSchema }),
+  /** Job result: `{ result: ValidatorResult }`. */
+  output: z.object({ jobId: z.string() }),
 });
 
 export const validatorsDismissRpc = defineRpc({
@@ -132,9 +135,10 @@ export const validatorsDismissRpc = defineRpc({
 export const validatorsSaveRpc = defineRpc({
   name: "prr.validators.save",
   input: z.object({
-    repo: z.string(),
+    repo: RepoSlugSchema,
     target: z.enum(["repo", "personal"]),
-    fileName: z.string(),
+    /** Bare file name only (no directories); ".md" is appended when missing. */
+    fileName: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/, "Use letters, digits, '.', '_' or '-' only"),
     markdown: z.string(),
   }),
   output: Ok,
@@ -165,10 +169,18 @@ export const agentTaskRpc = defineRpc({
   output: z.object({ jobId: z.string() }),
 });
 
+export const ChatStartResultSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string().nullable(),
+  reused: z.boolean(),
+});
+export type ChatStartResult = z.infer<typeof ChatStartResultSchema>;
+
 export const chatStartRpc = defineRpc({
   name: "prr.chat.start",
   input: PrRef.extend({ seed: z.string().optional(), agentChoiceId: z.string().optional() }),
-  output: z.object({ agentId: z.string(), workspaceId: z.string().nullable(), reused: z.boolean() }),
+  /** Job result: ChatStartResult. Creating the PR worktree can exceed the 30 s RPC cap. */
+  output: z.object({ jobId: z.string() }),
 });
 
 export const precomputeStatusRpc = defineRpc({

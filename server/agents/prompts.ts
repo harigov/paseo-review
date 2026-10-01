@@ -1,7 +1,5 @@
-import { services } from "../core/services";
+import { collectGuidanceFiles } from "./guidance";
 import type { Analysis, PrDetail, Repo } from "../../shared/types";
-
-const GUIDANCE_FILES = ["REVIEW.md", "AGENTS.md", "CLAUDE.md"];
 
 /** The PR context pack handed to agents as their system prompt (plan §8.4): title, url,
  * base/head, body, module map, validator failures, unresolved threads, guidance files. */
@@ -48,17 +46,12 @@ export async function buildContextPack(
   }
 
   const headSha = analysis?.headSha ?? pr.summary.headSha;
-  for (const name of GUIDANCE_FILES) {
-    try {
-      const content = await services.analysis.readFileAtRef(repo.slug, headSha, name);
-      if (content) {
-        lines.push("");
-        lines.push(`## ${name}`);
-        lines.push(content.slice(0, 4000));
-      }
-    } catch {
-      // Guidance files are optional; ignore read failures.
-    }
+  const touchedPaths = analysis?.files.map((f) => f.path) ?? [];
+  const guidanceFiles = await collectGuidanceFiles(repo.slug, headSha, touchedPaths);
+  for (const file of guidanceFiles) {
+    lines.push("");
+    lines.push(`## ${file.path}`);
+    lines.push(file.content);
   }
 
   return lines.join("\n");

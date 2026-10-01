@@ -10,8 +10,15 @@ export interface DraftComment {
 
 type Key = string;
 
-function keyOf(repo: string, number: number): Key {
-  return `${repo}#${number}`;
+// Keyed by head SHA too: a draft's `line`/`side` only makes sense against the diff it was
+// written against. If the PR is force-pushed or rebased, line numbers can shift — keying by
+// head SHA means drafts from a previous head simply stop showing up (see dropStaleDrafts).
+function keyOf(repo: string, number: number, headSha: string): Key {
+  return `${repo}#${number}#${headSha}`;
+}
+
+function prefixOf(repo: string, number: number): string {
+  return `${repo}#${number}#`;
 }
 
 const store = new Map<Key, DraftComment[]>();
@@ -23,19 +30,14 @@ function emit(key: Key): void {
   set.forEach((listener) => listener());
 }
 
-/** Snapshot read outside React (e.g. before submitting a review). */
-export function getDrafts(repo: string, number: number): DraftComment[] {
-  return store.get(keyOf(repo, number)) ?? [];
-}
-
-export function addDraft(repo: string, number: number, draft: DraftComment): void {
-  const key = keyOf(repo, number);
+export function addDraft(repo: string, number: number, headSha: string, draft: DraftComment): void {
+  const key = keyOf(repo, number, headSha);
   store.set(key, [...(store.get(key) ?? []), draft]);
   emit(key);
 }
 
-export function removeDraft(repo: string, number: number, index: number): void {
-  const key = keyOf(repo, number);
+export function removeDraft(repo: string, number: number, headSha: string, index: number): void {
+  const key = keyOf(repo, number, headSha);
   store.set(
     key,
     (store.get(key) ?? []).filter((_draft, position) => position !== index),
@@ -43,17 +45,34 @@ export function removeDraft(repo: string, number: number, index: number): void {
   emit(key);
 }
 
-export function clearDrafts(repo: string, number: number): void {
-  const key = keyOf(repo, number);
+export function clearDrafts(repo: string, number: number, headSha: string): void {
+  const key = keyOf(repo, number, headSha);
   store.set(key, []);
   emit(key);
 }
 
+/**
+ * Drops any drafts left over from a previous head for this PR (e.g. after a force-push or
+ * rebase changed line numbers) and returns how many were discarded, so the caller can warn.
+ */
+export function dropStaleDrafts(repo: string, number: number, currentHeadSha: string): number {
+  const prefix = prefixOf(repo, number);
+  const currentKey = keyOf(repo, number, currentHeadSha);
+  let discarded = 0;
+  for (const key of [...store.keys()]) {
+    if (!key.startsWith(prefix) || key === currentKey) continue;
+    discarded += store.get(key)?.length ?? 0;
+    store.delete(key);
+    emit(key);
+  }
+  return discarded;
+}
+
 const EMPTY: DraftComment[] = [];
 
-/** Live drafts for one PR; re-renders the caller whenever they change. */
-export function useDrafts(repo: string, number: number): DraftComment[] {
-  const key = keyOf(repo, number);
+/** Live drafts for one PR at its current head; re-renders the caller whenever they change. */
+export function useDrafts(repo: string, number: number, headSha: string): DraftComment[] {
+  const key = keyOf(repo, number, headSha);
   return useSyncExternalStore(
     (listener) => {
       let set = listeners.get(key);

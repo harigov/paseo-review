@@ -1,6 +1,6 @@
 # Paseo PR Review — Plan
 
-Status: approved, in implementation · 2026-10-01 · targets Paseo plugin API 0.11, runs on 0.10.2 via an adapter
+Status: v0.1 implemented · 2026-10-01 · targets Paseo plugin API 0.11, runs on 0.10.2 via an adapter. See §15 for known v0.1 limitations.
 
 A Paseo plugin that makes large GitHub pull requests easy to review and easy to ship. It is
 built on the Paseo plugin SDK, `gh`, local git, System One decision models (Jev / Cloudflare
@@ -123,6 +123,9 @@ lines, which is exactly the PR size we care about.
   directory, which `paseo plugin remove` deletes.
 - Every derived artifact is keyed by content (§6.10), so pushes and rebases invalidate only what
   actually changed.
+- Repo slugs are validated as `owner/name` and compared case-insensitively everywhere a repo is
+  looked up. Per-repo data files are named `<owner>__<name>[__<number>].json`, with the slug
+  lowercased, under `$PASEO_HOME/plugin-data/pr-review/`.
 
 ## 5. Decision engine (System One)
 
@@ -161,9 +164,13 @@ Adapters:
 
 | Adapter | Endpoint | Model | Auth / notes |
 |---|---|---|---|
+| OpenRouter (default) | `POST https://openrouter.ai/api/v1/systemone` | `typesafe/jev-1.13` | Bearer key (`OPENROUTER_API_KEY`) |
 | TypeSafe Jev | `POST https://api.typesafe.ai/v1/systemone` | `jev-latest`, or pinned | Bearer key |
 | Cloudflare Workers AI | `POST https://api.cloudflare.com/client/v4/accounts/<id>/ai/run/@cf/cloudflare/clef[-flash]` | `clef` / `clef-flash` | Unwraps the `result` envelope |
 | Cloudflare AI Gateway | Gateway URL | — | Optional; adds caching and logging |
+
+The **Endpoint URL** setting overrides the request URL for whichever provider is selected,
+including OpenRouter, so any of the above can be pointed at a self-hosted or gateway endpoint.
 
 Other client features:
 - Request batching: group questions that share a `state`, in chunks of 64.
@@ -171,9 +178,17 @@ Other client features:
 - **Credentials:** daemon-host environment variables (`TYPESAFE_API_KEY`,
   `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`) are preferred. Plugin settings are the
   fallback, stored on the daemon host.
-- **Privacy:** sending code to an external decision API is a per-repo opt-in, off by default.
-  When it's off, everything degrades to heuristics only, and validators are unavailable for that
-  repo.
+- **Privacy:** sending code to an external decision API is a per-repo opt-in, off by default,
+  and the opt-in is enforced everywhere a repo's content could reach the decision API: the
+  analysis pipeline, the validators "Test on this PR" action, and `/validate` on a local branch
+  (which resolves the workspace to its registered repo and refuses to run if that repo isn't
+  opted in). When a repo is off, everything degrades to git/path heuristics only, validators are
+  unavailable for it, and inbox attention scoring is skipped for its PRs.
+  What actually leaves the machine for an opted-in repo: diff hunks/file diffs and the PR title
+  for validators and module/noise/risk/complexity classification; PR title, body and file stats
+  for severity and change type. Inbox attention scoring sends PR metadata only (title, author,
+  sections, size, checks, review decision, draft state, age) — no code — and only runs for
+  repos that are opted in.
 
 ### 5.3 Where the decision engine is used
 
@@ -185,7 +200,7 @@ Other client features:
 | Risk | file diff + path | `score` 1–5 (impact if wrong) |
 | Complexity | file diff | `score` 1–5 (effort to understand) |
 | PR severity | title, body, module stats, top-risk hunks | `score` 1–5 |
-| PR change type | title, body, file list | `choice` {feature, fix, refactor, perf, deps, chore, docs} |
+| PR change type | title, body, file list | `choice` {feature, fix, refactor, perf, deps, chore, docs, test} |
 | "Changed since viewed" | old patch vs new patch of one file | `noul` "substantive change?" (trivial: rebase, format, comment-only) |
 | Thread triage | comment, original hunk, current hunk | `choice` {addressed, partially, not_addressed, unclear} |
 | Inbox attention | PR metadata, my role, CI, age, size | `score` 1–5 |
@@ -215,6 +230,9 @@ Analysis is effectively free; agents remain the cost centre.
 - unresolved thread count
 - "N files changed since your last review"
 
+Change type, severity, attention and "changed since your review" populate once an analysis
+exists for that PR; attention is scored only for repos opted into the decision API (§5.2).
+
 **Sorting and filtering:**
 - Sort by attention score (default), updated, created, size or severity.
 - Filter by repo, author, label, draft, CI, review decision or base branch.
@@ -241,7 +259,8 @@ Analysis is effectively free; agents remain the cost centre.
   viewed checkbox, moved/renamed badges, inline threads and validator markers. Noise is last
   and collapsed into a skim view.
 - **Validators tab:** results grouped by validator, with "Explain" and "Draft comment" actions.
-- **Conversations tab:** unresolved threads grouped by module, with their thread-triage verdict.
+- **Conversations tab:** unresolved threads grouped by module, with their thread-triage verdict
+  (stored in `Analysis.threadTriage`, keyed by thread id).
 - **Visual tab:** the generated visual overview (§8.3).
 - **Chat:** opens or creates the PR chat (§8.4).
 
@@ -431,8 +450,9 @@ Does this change let a caller act on data without an authorization check?
 
 ### 7.4 Authoring support
 
-- **Test validator:** runs a draft validator against the open PR and shows p per unit in about
-  a second.
+- **Test validator:** runs a draft validator against the open PR as a background job
+  (`prr.validators.test` starts it, `prr.job.poll` returns the result) and shows p per unit in
+  about a second.
 - **Guide:** single-property questions, explicit `violation` / `compliant` / `not_applicable`
   text, nothing multi-hop or counting-based (Jev's documented weak spots).
 - **Starter pack:** about 15 validators adapted from awesome-reviewers (Apache-2.0), plus a
@@ -448,7 +468,9 @@ before the PR is opened.
 
 ### 8.1 Runner
 
-Built on `paseo.agents` (pattern adapted from review-deck):
+Built on `paseo.agents` (pattern adapted from review-deck). Every task that creates an agent,
+including chat start, runs as a background job (`prr.job.poll`), per the start-then-poll rule
+in §3:
 
 1. Create the agent with labels `pr-review.kind` and `pr-review.pr`.
 2. Poll `waitForFinish(2000)` from short RPCs.
@@ -463,8 +485,9 @@ Each task (summary, chat, explain, describe, visual) has its own default.
 
 ### 8.2 Read-only toolset
 
-The plugin subprocess hosts an HTTP MCP server bound to `127.0.0.1:<random>`, with a bearer
-token per session. It reads from the mirror at exact commits.
+The plugin subprocess hosts a single long-lived HTTP MCP server (not one per task) bound to
+`127.0.0.1:<random>`, issuing a fresh bearer token per session/task. It reads from the mirror
+at exact commits.
 
 **Tools:**
 - `pr_overview`
@@ -536,8 +559,11 @@ permission behaviour or fall back to its Ask mode.
 upstream fix is to expose Paseo's existing HTML preview, which already has a hardened WebView,
 as a plugin host component.
 
-**Size budget:** the renderer injects a small set of approved libraries (Mermaid, a chart
-library). Descriptions reference them instead of inlining them.
+**Size budget:** library injection (Mermaid, a chart library) is not implemented. Each
+`paseo:html` block must be fully self-contained (inline SVG/CSS/JS only) — the sandbox blocks
+network access, so an externally-hosted library wouldn't load anyway. A Mermaid code fence in
+the normal markdown part of the body is unaffected and still renders natively on github.com and
+in the markdown fallback.
 
 **Threat model:** PR descriptions are attacker-controlled. The sandbox is mandatory. The one
 remaining hole, a page navigating itself, matches Paseo's documented one.
@@ -545,7 +571,9 @@ remaining hole, a page navigating itself, matches Paseo's documented one.
 ### 9.3 Visual overview
 
 Generated on demand by an agent using the toolset: architecture or data-flow diagrams, a module
-map, and before/after views where relevant. It uses the same renderer and is cached by head SHA.
+map, and before/after views where relevant. The agent is instructed to produce one self-contained
+HTML document (inline CSS/SVG/JS only, no external libraries or network requests — see §9.2). It
+uses the same renderer and is cached by head SHA.
 
 ## 10. Reuse map
 
@@ -566,7 +594,10 @@ Bootstrapping steps:
 ## 11. Layout
 
 ```
-paseo-plugin.json        id: pr-review, requirements.paseo >=0.11.0, build: [["npm","ci"]]
+paseo-plugin.json        id: pr-review, requirements.paseo >=0.11.0,
+                         build: [["npm","ci","--omit=dev","--ignore-scripts"]]
+                         (zod and the Paseo SDK are supplied by the daemon at runtime, so the
+                         git-install build step only needs `dependencies`, not devDependencies)
 index.client.tsx         registrations only
 index.server.ts          registrations only
 client/
@@ -680,3 +711,17 @@ Paseo PRs to:
 | SDK gaps | No workspace labels, no HTML host component, no data-directory API, and no host diff view or `openFile`. Tracked as upstream PRs. |
 | Cursor | ACP doesn't honour `toolPolicy` pre-approval. |
 | Enterprise | GitHub Enterprise hosts are out of scope for v1. The `gh` hostname plumbing is kept so they can be added later. |
+
+## 15. Known limitations (v0.1)
+
+- **No library injection** in rich HTML or visual-overview blocks (§9.2, §9.3): Mermaid and
+  chart libraries are not injected; `paseo:html` blocks must be self-contained. A Mermaid code
+  fence in the normal markdown body is unaffected and still renders on github.com.
+- **Diff viewer is unified-view only** (§6.5); split view is not implemented.
+- **Desktop keyboard shortcuts** (`j`/`k`/`v`/`n`, §6.5) are not implemented yet.
+- **Mobile HTML rendering** still falls back to markdown, pending the upstream HTML-preview host
+  component (§9.1, §14).
+- **Workspace labels** are not implemented, pending the upstream SDK change (§9.1, §14).
+- **Cursor's read-only mode is best-effort**: ACP doesn't honour `toolPolicy` pre-approval
+  (§8.2, §14).
+- **Precompute runs PRs sequentially**, one at a time, not in parallel (§6.8).

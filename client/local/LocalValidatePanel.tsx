@@ -3,15 +3,22 @@ import { Pressable, Text, View } from "react-native";
 import { TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import { useRpc, useWorkspace } from "@getpaseo/plugin/client";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import { z } from "zod";
 import { localValidateRpc } from "../../shared/rpc";
-import type { ValidatorResult } from "../../shared/types";
+import { ValidatorResultSchema, type ValidatorResult } from "../../shared/types";
 import { useJobRunner } from "../data/hooks";
 import { ValidatorResultsList, validatorScoreboard } from "../review/ValidatorResultsList";
 
-function parseResults(raw: unknown): ValidatorResult[] {
-  if (!raw || typeof raw !== "object") return [];
-  const value = (raw as { results?: unknown }).results;
-  return Array.isArray(value) ? (value as ValidatorResult[]) : [];
+const LocalValidateResultSchema = z.object({
+  results: z.array(ValidatorResultSchema).default([]),
+  /** e.g. "Decision model off for this repo" when validators couldn't run. */
+  notice: z.string().optional(),
+});
+
+function parseResults(raw: unknown): { results: ValidatorResult[]; notice: string | null } {
+  const parsed = LocalValidateResultSchema.safeParse(raw);
+  if (!parsed.success) return { results: [], notice: null };
+  return { results: parsed.data.results, notice: parsed.data.notice ?? null };
 }
 
 export function LocalValidatePanel(props: PluginWorkspacePanelProps) {
@@ -23,17 +30,21 @@ export function LocalValidatePanel(props: PluginWorkspacePanelProps) {
   const toast = useToast();
   const [baseRef, setBaseRef] = useState("");
   const [results, setResults] = useState<ValidatorResult[] | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function onRun() {
     if (!workspace) return;
     setResults(null);
+    setNotice(null);
     try {
       const finished = await run(() => rpc({ cwd: workspace.directory, baseRef: baseRef.trim() || undefined }));
       if (finished.status === "error") {
         toast.error(finished.error ?? "Validation failed");
         return;
       }
-      setResults(parseResults(finished.result));
+      const parsed = parseResults(finished.result);
+      setResults(parsed.results);
+      setNotice(parsed.notice);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Validation failed");
     }
@@ -67,7 +78,9 @@ export function LocalValidatePanel(props: PluginWorkspacePanelProps) {
         results.length === 0 ? (
           <View style={{ gap: 4, padding: 10, borderWidth: 1, borderColor: c.border, borderRadius: 6 }}>
             <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-              {job?.error ?? "No results. Validators need this repo opted in to send code to the decision API — turn that on in PR Review settings, or check that any validators are enabled."}
+              {notice ??
+                job?.error ??
+                "No results. Validators need this repo opted in to send code to the decision API — turn that on in PR Review settings, or check that any validators are enabled."}
             </Text>
           </View>
         ) : (
