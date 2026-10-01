@@ -210,6 +210,7 @@ export function ModuleTab(props: ModuleTabProps) {
                 scope={scope}
                 theme={theme}
                 layout={props.layout}
+                diffLayout={props.diffLayout}
                 threads={fileThreads}
                 findings={fileFindings}
               />
@@ -226,7 +227,7 @@ export function ModuleTab(props: ModuleTabProps) {
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viewedOverride, expanded, detail, analysis, sinceViewedPaths, sinceLastReview, c, repo, number, headSha, theme, props.layout],
+    [viewedOverride, expanded, detail, analysis, sinceViewedPaths, sinceLastReview, c, repo, number, headSha, theme, props.layout, props.diffLayout],
   );
 
   if (!analysis) return <Text style={{ color: c.foregroundMuted, padding: 16 }}>Loading module…</Text>;

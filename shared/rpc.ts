@@ -8,6 +8,7 @@ import {
   PrDetailSchema,
   PrSummarySchema,
   RepoSchema,
+  StructuralDiffSchema,
   ValidatorResultSchema,
   ValidatorSchema,
   ViewedStateSchema,
@@ -97,6 +98,13 @@ export const fileDiffRpc = defineRpc({
     scope: z.enum(["full", "since_viewed", "since_last_review"]),
   }),
   output: FileDiffSchema,
+});
+
+export const fileStructuralDiffRpc = defineRpc({
+  name: "prr.file.structural",
+  input: PrRef.extend({ path: z.string() }),
+  /** `diff` is null when the file isn't eligible for a structural view (see AnalyzedFile.structuralKind). */
+  output: z.object({ diff: StructuralDiffSchema.nullable() }),
 });
 
 export const fileMoveRpc = defineRpc({

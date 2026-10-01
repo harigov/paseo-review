@@ -7,7 +7,7 @@ import { openExternalUrl } from "@getpaseo/plugin/client";
 import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
 import { ChatStartResultSchema, chatStartRpc, prAnalyzeRpc } from "../../shared/rpc";
 import { prReviewSettings } from "../../shared/settings";
-import type { ReadingOrder } from "../../shared/types";
+import type { DiffLayout, ReadingOrder } from "../../shared/types";
 import type { PrTabContext } from "../pr/tab-props";
 import { Dot, riskColor } from "../ui/chips";
 import { OverviewTab } from "./OverviewTab";
@@ -40,12 +40,15 @@ export function PrScreen(
 
   const [activeTab, setActiveTab] = useState("overview");
   const [readingOrder, setReadingOrder] = useState<ReadingOrder>("foundations");
+  const [diffLayout, setDiffLayout] = useState<DiffLayout>("inline");
   const [sinceLastReview, setSinceLastReview] = useState(false);
   const [initializedReadingOrder, setInitializedReadingOrder] = useState(false);
 
+  // Seed per-session view preferences from settings once they load; later toggles stay local.
   useEffect(() => {
     if (!initializedReadingOrder && settings.status === "ready") {
       setReadingOrder(settings.values.readingOrder);
+      setDiffLayout(settings.values.diffLayout);
       setInitializedReadingOrder(true);
     }
   }, [initializedReadingOrder, settings.status, settings.status === "ready" ? settings.values.readingOrder : null]);
@@ -131,12 +134,14 @@ export function PrScreen(
       analysis,
       readingOrder,
       sinceLastReview,
+      diffLayout,
+      setDiffLayout,
       refresh,
       reanalyze,
       openChat,
       openTab: setActiveTab,
     }),
-    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, refresh, reanalyze, openChat],
+    [theme, layout, navigation, repo, number, detail, analysis, readingOrder, sinceLastReview, diffLayout, refresh, reanalyze, openChat],
   );
 
   const moduleTabs = useMemo(() => {

@@ -16,6 +16,7 @@ const repo: Repo = {
 const analysis: Analysis = {
   repo: repo.slug,
   number: 42,
+  version: 2,
   headSha: "head123",
   baseSha: "base123",
   mergeBaseSha: "merge123",
@@ -50,6 +51,8 @@ const analysis: Analysis = {
       changedSinceLastReview: false,
       rebaseOnly: false,
       order: { foundations: 0, risk: 0, chrono: 0 },
+      outline: null,
+      structuralKind: null,
     },
   ],
   validators: [],
@@ -111,6 +114,8 @@ const prDetail: PrDetail = {
     },
   ],
   checks: [],
+  reviews: [],
+  reviewRequests: [],
 };
 
 beforeAll(() => {
@@ -127,6 +132,7 @@ beforeAll(() => {
     getAnalysis: async () => analysis,
     ensurePrRefs: async () => ({ mirrorPath: "/tmp/mirror", headSha: "head123", baseSha: "base123", mergeBaseSha: "merge123" }),
     getFileDiff: async () => ({ path: "src/index.ts", oldPath: null, binary: false, truncated: false, hunks: [] }),
+    getStructuralDiff: async () => null,
     getRawDiff: async () => "diff --git a/src/index.ts b/src/index.ts\n+added line\n",
     readFileAtRef: async (_repo, _ref, filePath) => (filePath === "REVIEW.md" ? "Review carefully." : null),
     searchAtRef: async () => ["src/index.ts:1:added line"],

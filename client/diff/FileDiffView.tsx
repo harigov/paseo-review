@@ -6,7 +6,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { highlightCode, resolveSyntaxColors, type HighlightToken } from "@getpaseo/highlight";
 import { fileDiffRpc } from "../../shared/rpc";
-import type { DiffLine, FileDiff, Hunk, Thread, ValidatorFinding } from "../../shared/types";
+import type { DiffLayout, DiffLine, FileDiff, Hunk, Thread, ValidatorFinding } from "../../shared/types";
 import { addDraft, type DraftComment } from "../review/drafts";
 
 export interface FileDiffFinding extends ValidatorFinding {
@@ -108,6 +108,7 @@ export function FileDiffView({
   scope,
   theme,
   layout,
+  diffLayout = "inline",
   threads,
   findings,
   onComment,
@@ -120,6 +121,8 @@ export function FileDiffView({
   scope: "full" | "since_viewed" | "since_last_review";
   theme: PluginSurfaceProps["theme"];
   layout: PluginSurfaceProps["layout"];
+  /** "inline" (one column) or "split" (old | new). Split falls back to inline on compact layouts. */
+  diffLayout?: DiffLayout;
   threads: Thread[];
   findings: FileDiffFinding[];
   onComment?: (draft: DraftComment) => void;

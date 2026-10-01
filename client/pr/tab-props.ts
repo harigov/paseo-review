@@ -1,5 +1,5 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import type { Analysis, PrDetail, ReadingOrder } from "../../shared/types";
+import type { Analysis, DiffLayout, PrDetail, ReadingOrder } from "../../shared/types";
 
 /** Props every PR tab receives from the PR screen shell (client/app). */
 export interface PrTabContext {
@@ -13,6 +13,9 @@ export interface PrTabContext {
   readingOrder: ReadingOrder;
   /** Filter to files changed since the viewer's last review. */
   sinceLastReview: boolean;
+  /** Inline (one column) or split (old | new) file diffs. Seeded from settings; toggled per session. */
+  diffLayout: DiffLayout;
+  setDiffLayout(layout: DiffLayout): void;
   /** Re-fetch PR detail + analysis (e.g. after toggling viewed). */
   refresh(): void;
   /** Force a fresh analysis run (e.g. after submitting a review, so "since my last review" moves). */
