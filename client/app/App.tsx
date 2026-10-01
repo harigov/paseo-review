@@ -9,10 +9,13 @@ import { recordRecentPr, rememberLocation, useLastLocation, useUiStateHydration 
 export function PrReviewApp(props: PluginSurfaceProps) {
   const { ready } = useUiStateHydration();
   const lastLocation = useLastLocation();
-  const [selected, setSelected] = useState<{ repo: string; number: number } | null>(null);
-  // Applies the persisted last location to `selected` exactly once per mount, as soon as
-  // hydration is ready (it may already be ready on mount, if this isn't the session's first visit).
-  const appliedInitialLocation = useRef(false);
+  // Seed from the persisted location synchronously when it is already hydrated (every visit after
+  // the session's first), so a re-mount lands on the PR without first flashing the inbox.
+  const [selected, setSelected] = useState<{ repo: string; number: number } | null>(() =>
+    ready && lastLocation.kind === "pr" ? { repo: lastLocation.repo, number: lastLocation.number } : null,
+  );
+  // On the session's first visit hydration finishes after mount; apply the location exactly once then.
+  const appliedInitialLocation = useRef(ready);
 
   useEffect(() => {
     if (!ready || appliedInitialLocation.current) return;
