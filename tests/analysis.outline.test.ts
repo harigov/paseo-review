@@ -343,3 +343,49 @@ describe("computeOutlines — renamed file reads base at oldPath", () => {
     expect(calls.some(([side, path]) => side === "base" && path === "new/path.ts")).toBe(false);
   });
 });
+
+describe("scanDeclarationEnd with parenthesised headers", () => {
+  it("does not end a function at the closing brace of a destructured parameter object", async () => {
+    const head = [
+      "export function Panel({",
+      "  title,",
+      "  items,",
+      "}: {",
+      "  title: string;",
+      "  items: string[];",
+      "}) {",
+      "  const count = items.length;",
+      "  return count;",
+      "}",
+      "",
+      "export function after() {",
+      "  return 1;",
+      "}",
+      "",
+    ].join("\n");
+    const base = head.replace("  return count;", "  return count + 1;");
+    const file = parseUnifiedDiff(
+      [
+        "diff --git a/src/panel.tsx b/src/panel.tsx",
+        "index 111..222 100644",
+        "--- a/src/panel.tsx",
+        "+++ b/src/panel.tsx",
+        "@@ -8,3 +8,3 @@",
+        "   const count = items.length;",
+        "-  return count + 1;",
+        "+  return count;",
+        " }",
+        "",
+      ].join("\n"),
+    )[0];
+    const contents = new Map<string, string>([["base:src/panel.tsx", base], ["head:src/panel.tsx", head]]);
+    const out = await computeOutlines([file], async (side, path) => contents.get(`${side}:${path}`) ?? null);
+    const entries = out.get("src/panel.tsx") ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe("Panel");
+    expect(entries[0].change).toBe("modified");
+    expect(entries[0].newStart).toBe(1);
+    expect(entries[0].newEnd).toBe(10);
+    expect(entries[0].changedLines).toBe(2);
+  });
+});

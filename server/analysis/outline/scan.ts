@@ -34,6 +34,10 @@ const DEFAULT_MAX_LINES = 4000;
 export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: ScanOptions, maxLines = DEFAULT_MAX_LINES): ScanResult {
   let depth = 0;
   let sawBrace = false;
+  // Braces inside a parenthesised parameter list — `function F({ a, b }: { a: string }) {` or a
+  // multi-line destructured React props object — are not the body; the body brace comes after
+  // the parentheses close.
+  let parenDepth = 0;
   let inBlockComment = false;
   let inString: string | null = null;
   const limit = Math.min(lines.length, startLineIdx + maxLines);
@@ -77,19 +81,33 @@ export function scanDeclarationEnd(lines: string[], startLineIdx: number, opts: 
         ci++;
         continue;
       }
+      if (ch === "(") {
+        parenDepth++;
+        ci++;
+        continue;
+      }
+      if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+        ci++;
+        continue;
+      }
       if (ch === "{") {
-        depth++;
-        sawBrace = true;
+        if (parenDepth === 0) {
+          depth++;
+          sawBrace = true;
+        }
         ci++;
         continue;
       }
       if (ch === "}") {
-        depth--;
         ci++;
-        if (sawBrace && depth <= 0) return { endLineIdx: li, hasBody: true };
+        if (parenDepth === 0) {
+          depth--;
+          if (sawBrace && depth <= 0) return { endLineIdx: li, hasBody: true };
+        }
         continue;
       }
-      if (ch === ";" && depth === 0 && !sawBrace) return { endLineIdx: li, hasBody: false };
+      if (ch === ";" && depth === 0 && parenDepth === 0 && !sawBrace) return { endLineIdx: li, hasBody: false };
       ci++;
     }
   }
