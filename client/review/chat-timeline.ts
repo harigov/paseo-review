@@ -1,11 +1,25 @@
-// Pure mapping from a Paseo agent's timeline (protocol types) to the chat panel's own
-// `ChatMessage` shape. No React / react-native / @getpaseo/plugin runtime imports here: this
-// file is exercised by tests/chat-timeline.test.ts under tsconfig.server.json (Node globals
-// only), so only `import type` from @getpaseo/client / @getpaseo/protocol is allowed, and
-// every input is handled defensively (`unknown`) since both a refetched page and a live stream
-// event are daemon payloads this plugin does not control the shape of.
-import type { PaseoAgentTimelineEvent } from "@getpaseo/client";
-import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
+// Pure mapping from a Paseo agent's timeline to the chat panel's own `ChatMessage` shape.
+// No React / react-native / @getpaseo/plugin runtime imports here: this file is exercised by
+// tests/chat-timeline.test.ts under tsconfig.server.json (Node globals only). Host packages
+// such as @getpaseo/client and @getpaseo/protocol are also off limits — Paseo's client
+// compiler resolves `import type`, those specifiers are not plugin SDK modules, and
+// `npm ci --omit=dev` does not install them. Every input is handled defensively (`unknown`)
+// since both a refetched page and a live stream event are daemon payloads this plugin does
+// not control the shape of.
+
+/** Fields this module reads from a live `agent.timeline.subscribe` payload. Structural
+ * subset of the host `PaseoAgentTimelineEvent`: `seq`/`timestamp` sit beside `event` on a
+ * timeline stream, and the other variants carry no chat content except `error`. */
+type AgentTimelineLiveEvent =
+  | {
+      agentId: string;
+      seq?: number;
+      timestamp: string;
+      event: { type: "timeline"; item: unknown; turnId?: string };
+    }
+  | { agentId: string; event: { type: "replacement" } }
+  | { agentId: string; event: { type: "error"; error: string } }
+  | { agentId: string; event: { type: "subscription_restored" } };
 
 export interface ChatMessage {
   id: string;
@@ -20,9 +34,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Runtime shape check standing in for real validation of a daemon-pushed event — just enough
- * structure (`agentId` + a typed `event`) to safely narrow to `PaseoAgentTimelineEvent` and get
- * real field types (e.g. the `timeline` variant's sibling `seq`/`timestamp`) from here on. */
-function isAgentTimelineEvent(value: unknown): value is PaseoAgentTimelineEvent {
+ * structure (`agentId` + a typed `event`) to narrow to `AgentTimelineLiveEvent` and read the
+ * `timeline` variant's sibling `seq`/`timestamp` from here on. */
+function isAgentTimelineEvent(value: unknown): value is AgentTimelineLiveEvent {
   return isRecord(value) && typeof value.agentId === "string" && isRecord(value.event) && typeof value.event.type === "string";
 }
 
@@ -132,7 +146,7 @@ function itemId(item: Record<string, unknown>, fallbackId: string): string {
  * (thinking/reasoning narration, todo lists, compaction markers, unrecognized plugin items). */
 function mapItemToMessage(rawItem: unknown, fallbackId: string): ChatMessage | null {
   if (!isRecord(rawItem) || typeof rawItem.type !== "string") return null;
-  const item = rawItem as Record<string, unknown> & { type: AgentTimelineItem["type"] | string };
+  const item = rawItem as Record<string, unknown> & { type: string };
   const id = itemId(item, fallbackId);
 
   switch (item.type) {
@@ -190,7 +204,7 @@ function upsertMessage(messages: ChatMessage[], next: ChatMessage): ChatMessage[
 }
 
 /**
- * Merges one live timeline event (`PaseoAgentTimelineEvent`, from `agent.timeline.subscribe`)
+ * Merges one live timeline event (`AgentTimelineLiveEvent`, from `agent.timeline.subscribe`)
  * into the current message list:
  *  - a `timeline` event appends a new item, or updates one already in the list sharing its id
  *    (e.g. an in-flight assistant message whose text keeps growing across events);
