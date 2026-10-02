@@ -3,6 +3,15 @@ import { z } from "zod";
 import { DetailLevelSchema, DiffLayoutSchema } from "./types";
 
 export const DecisionProviderSchema = z.enum(["openrouter", "cloudflare", "jev", "custom"]);
+export type DecisionProvider = z.infer<typeof DecisionProviderSchema>;
+
+/** Model used when the settings leave `decision.model` empty. */
+export const DEFAULT_DECISION_MODELS: Record<DecisionProvider, string> = {
+  openrouter: "typesafe/jev-1.13",
+  cloudflare: "clef-flash",
+  jev: "jev-latest",
+  custom: "jev-latest",
+};
 
 /**
  * One review-depth rule: a plain-language condition the decision model checks against each

@@ -1,16 +1,9 @@
 import { createHash } from "node:crypto";
 import type { SystemOneAnswer, SystemOneQuestion } from "../core/services";
 import { getSettings } from "../core/settings";
+import { DEFAULT_DECISION_MODELS, type DecisionProvider } from "../../shared/settings";
 
-export type DecisionProvider = "openrouter" | "cloudflare" | "jev" | "custom";
-
-/** Model used when the settings leave `decision.model` empty. */
-export const DEFAULT_MODELS: Record<DecisionProvider, string> = {
-  openrouter: "typesafe/jev-1.13",
-  cloudflare: "clef-flash",
-  jev: "jev-latest",
-  custom: "jev-latest",
-};
+export type { DecisionProvider };
 
 export const OPENROUTER_SYSTEMONE_URL = "https://openrouter.ai/api/v1/systemone";
 
@@ -36,7 +29,7 @@ export async function resolveConfig(): Promise<{ config: ResolvedDecisionConfig 
   const settings = await getSettings();
   const d = settings.decision;
   const provider = d.provider;
-  const model = d.model?.trim() || DEFAULT_MODELS[provider] || "jev-latest";
+  const model = d.model?.trim() || DEFAULT_DECISION_MODELS[provider] || "jev-latest";
   const concurrency = Math.max(1, Math.min(32, d.concurrency ?? 8));
   const overrideUrl = d.endpointUrl?.trim() || "";
   let apiKey = d.apiKey?.trim() || "";
@@ -93,7 +86,7 @@ export async function resolveConfig(): Promise<{ config: ResolvedDecisionConfig 
   if (!overrideUrl) {
     return {
       config: null,
-      reason: "Set a custom endpoint URL in PR Review settings (decision.endpointUrl).",
+      reason: "Set an endpoint URL in PR Review settings (Decision model → Connection).",
     };
   }
   return { config: { provider, model, url: overrideUrl, apiKey: apiKey || null, concurrency }, reason: null };

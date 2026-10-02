@@ -6,15 +6,25 @@ import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/react-nativ
 import {
   ExternalLink,
   SettingsAction,
+  SettingsCard,
   SettingsGroup,
   SettingsInput,
   SettingsRow,
+  SettingsSection,
   SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { agentChoicesRpc, precomputeStatusRpc, reposListRpc } from "../../shared/rpc";
-import { prReviewSettings, PrReviewSettingsSchema, type DepthRule, type PrReviewSettings } from "../../shared/settings";
+import {
+  DEFAULT_DECISION_MODELS,
+  prReviewSettings,
+  PrReviewSettingsSchema,
+  type DecisionProvider,
+  type DepthRule,
+  type PrReviewSettings,
+} from "../../shared/settings";
 import { DETAIL_LEVELS, DETAIL_LEVEL_LABELS } from "../../shared/levels";
+import { agoLabel } from "../ui/time";
 import { font, space, surfaces } from "../ui/tokens";
 
 const PROVIDER_OPTIONS = [
@@ -23,6 +33,13 @@ const PROVIDER_OPTIONS = [
   { label: "TypeSafe Jev", value: "jev" as const },
   { label: "Custom endpoint", value: "custom" as const },
 ];
+
+const API_KEY_HINTS: Record<DecisionProvider, string> = {
+  openrouter: "Your OpenRouter key. Or set OPENROUTER_API_KEY on the daemon host.",
+  cloudflare: "A Cloudflare API token. Or set CLOUDFLARE_API_TOKEN on the daemon host.",
+  jev: "Your TypeSafe key. Or set TYPESAFE_API_KEY on the daemon host.",
+  custom: "Optional for self-hosted endpoints. Or set SYSTEMONE_API_KEY on the daemon host.",
+};
 
 const READING_ORDER_OPTIONS = [
   { label: "Foundations first", value: "foundations" as const },
@@ -40,8 +57,6 @@ const DIFF_DENSITY_OPTIONS = [
   { label: "Compact", value: "compact" as const },
 ];
 
-const DEPTH_LEVEL_OPTIONS = DETAIL_LEVELS.map((level) => ({ label: DETAIL_LEVEL_LABELS[level], value: level }));
-
 /** Inserted by "Add starter rules" (only offered while the list is empty). */
 const STARTER_DEPTH_RULES: DepthRule[] = [
   { when: "Touches authentication, authorization, payments, secrets, or data migrations", level: "code", enabled: true },
@@ -50,12 +65,12 @@ const STARTER_DEPTH_RULES: DepthRule[] = [
   { when: "Only tests, fixtures, snapshots, generated code, or documentation", level: "files", enabled: true },
 ];
 
-const AGENT_TASKS: { key: keyof PrReviewSettings["agents"]; label: string }[] = [
-  { key: "summary", label: "Summary" },
-  { key: "chat", label: "Chat" },
-  { key: "explain", label: "Explain" },
-  { key: "visual", label: "Visual overview" },
-  { key: "describe", label: "Describe (rich HTML)" },
+const AGENT_TASKS: { key: keyof PrReviewSettings["agents"]; label: string; hint: string }[] = [
+  { key: "summary", label: "Summary", hint: "PR and module summaries on Overview." },
+  { key: "chat", label: "Chat", hint: "The chat side panel." },
+  { key: "explain", label: "Explain", hint: "The Explain button on findings and conversations." },
+  { key: "visual", label: "Visual overview", hint: "The diagram on the Visual tab." },
+  { key: "describe", label: "PR description", hint: "Describe PR (rich HTML) on Overview." },
 ];
 
 // Text inputs save on a pause in typing, not on every keystroke.
@@ -193,10 +208,11 @@ function NumberSettingsInput({
 }
 
 /**
- * Ordered list of review-depth rules. Each row is fully controlled (not the usual `SettingsInput`
- * uncontrolled pattern) because reordering swaps content across rows by index — an uncontrolled
- * input would keep showing its own stale text after a move. `useSettingsCommitter`'s `bump()`
- * (see above) repaints this list right after every edit, so the controlled values never lag.
+ * Ordered list of review-depth rules, one card row per rule. Each row is fully controlled (not the
+ * usual `SettingsInput` uncontrolled pattern) because reordering swaps content across rows by
+ * index — an uncontrolled input would keep showing its own stale text after a move.
+ * `useSettingsCommitter`'s `bump()` (see above) repaints this list right after every edit, so the
+ * controlled values never lag.
  */
 function ReviewDepthRules({
   theme,
@@ -224,87 +240,93 @@ function ReviewDepthRules({
 
   if (rules.length === 0) {
     return (
-      <View style={{ gap: space.sm }}>
-        <Text style={{ ...font.small, color: c.foregroundMuted }}>
-          No rules yet — PR Review uses its built-in default for every module.
-        </Text>
-        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-          <Pressable accessibilityRole="button" onPress={onAdd} style={s.buttonQuiet}>
-            <Text style={s.buttonQuietText}>Add rule</Text>
-          </Pressable>
-          <Pressable accessibilityRole="button" onPress={onAddStarters} style={s.button}>
-            <Text style={s.buttonText}>Add starter rules</Text>
-          </Pressable>
-        </View>
-      </View>
+      <SettingsCard>
+        <SettingsRow label="No rules yet" hint="Every module opens at the built-in default depth. Start from a few examples, or write your own.">
+          <View style={{ flexDirection: "row", gap: space.sm }}>
+            <Pressable accessibilityRole="button" onPress={onAdd} style={s.buttonQuiet}>
+              <Text style={s.buttonQuietText}>Add rule</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={onAddStarters} style={s.button}>
+              <Text style={s.buttonText}>Add starter rules</Text>
+            </Pressable>
+          </View>
+        </SettingsRow>
+      </SettingsCard>
     );
   }
 
   return (
-    <View style={{ gap: space.sm }}>
-      <View style={s.card}>
-        {rules.map((rule, index) => (
-          <View key={index}>
-            {index > 0 && <View style={{ ...s.hairline, marginVertical: space.sm }} />}
-            <View style={{ gap: space.xs }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-                <Text style={{ ...font.caption, color: c.foregroundMuted, flex: 1 }}>Rule {index + 1}</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Move rule up"
-                  disabled={index === 0}
-                  onPress={() => onMove(index, -1)}
-                  style={{ opacity: index === 0 ? 0.35 : 1, padding: 4 }}
-                >
-                  <Icon name="ArrowUp" size={14} color={c.foregroundMuted} />
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Move rule down"
-                  disabled={index === rules.length - 1}
-                  onPress={() => onMove(index, 1)}
-                  style={{ opacity: index === rules.length - 1 ? 0.35 : 1, padding: 4 }}
-                >
-                  <Icon name="ArrowDown" size={14} color={c.foregroundMuted} />
-                </Pressable>
-                <Pressable accessibilityRole="button" accessibilityLabel="Delete rule" onPress={() => onDelete(index)} style={{ padding: 4 }}>
-                  <Icon name="Trash2" size={14} color={c.statusDanger} />
-                </Pressable>
-              </View>
-              <TextInput
-                value={rule.when}
-                onChangeText={(when) => onChangeWhen(index, when)}
-                multiline
-                placeholder="e.g. Touches authentication, authorization, payments, secrets, or data migrations"
-                style={{ ...s.input, minHeight: 60 }}
-              />
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
-                <View style={{ flex: 1 }}>
-                  <SettingsSelect
-                    label="Opens at"
-                    value={rule.level}
-                    options={DEPTH_LEVEL_OPTIONS}
-                    onValueChange={(level) => onChangeLevel(index, level)}
-                  />
-                </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
-                  <Text style={{ ...font.small, color: c.foregroundMuted }}>Enabled</Text>
-                  <Switch value={rule.enabled} onValueChange={(enabled) => onToggleEnabled(index, enabled)} />
-                </View>
-              </View>
+    <SettingsCard>
+      {rules.map((rule, index) => (
+        <View key={index} style={{ paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <Text style={{ ...font.caption, color: c.foregroundMuted, flex: 1 }}>Rule {index + 1}</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Move rule up"
+              disabled={index === 0}
+              onPress={() => onMove(index, -1)}
+              style={{ opacity: index === 0 ? 0.35 : 1, padding: 4 }}
+            >
+              <Icon name="ArrowUp" size={14} color={c.foregroundMuted} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Move rule down"
+              disabled={index === rules.length - 1}
+              onPress={() => onMove(index, 1)}
+              style={{ opacity: index === rules.length - 1 ? 0.35 : 1, padding: 4 }}
+            >
+              <Icon name="ArrowDown" size={14} color={c.foregroundMuted} />
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Delete rule" onPress={() => onDelete(index)} style={{ padding: 4 }}>
+              <Icon name="Trash2" size={14} color={c.statusDanger} />
+            </Pressable>
+          </View>
+          <TextInput
+            value={rule.when}
+            onChangeText={(when) => onChangeWhen(index, when)}
+            multiline
+            placeholder="e.g. Touches authentication, authorization, payments, secrets, or data migrations"
+            style={{ ...s.input, minHeight: 60, opacity: rule.enabled ? 1 : 0.6 }}
+          />
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: space.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.xs, opacity: rule.enabled ? 1 : 0.6 }}>
+              <Text style={{ ...font.small, color: c.foregroundMuted, marginRight: space.xs }}>Opens at</Text>
+              {DETAIL_LEVELS.map((level) => {
+                const active = rule.level === level;
+                return (
+                  <Pressable
+                    key={level}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: active }}
+                    onPress={() => onChangeLevel(index, level)}
+                    style={s.pill(active)}
+                  >
+                    <Text style={s.pillText(active)}>{DETAIL_LEVEL_LABELS[level]}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
+              <Text style={{ ...font.small, color: c.foregroundMuted }}>Enabled</Text>
+              <Switch value={rule.enabled} onValueChange={(enabled) => onToggleEnabled(index, enabled)} />
             </View>
           </View>
-        ))}
+        </View>
+      ))}
+      <View key="add" style={{ paddingHorizontal: space.lg, paddingVertical: space.md, alignItems: "flex-start" }}>
+        <Pressable accessibilityRole="button" onPress={onAdd} style={s.buttonQuiet}>
+          <Text style={s.buttonQuietText}>Add rule</Text>
+        </Pressable>
       </View>
-      <Pressable accessibilityRole="button" onPress={onAdd} style={{ ...s.buttonQuiet, alignSelf: "flex-start" }}>
-        <Text style={s.buttonQuietText}>Add rule</Text>
-      </Pressable>
-    </View>
+    </SettingsCard>
   );
 }
 
 export function SettingsScreen(props: PluginSurfaceProps): ReactNode {
   const { theme } = props;
+  const c = theme.colors;
   const settings = useSettings(prReviewSettings);
   const reposRpc = useRpc(reposListRpc);
   const agentChoicesRpcFn = useRpc(agentChoicesRpc);
@@ -327,101 +349,86 @@ export function SettingsScreen(props: PluginSurfaceProps): ReactNode {
   let content: ReactNode;
 
   if (settings.status === "loading") {
-    content = <SettingsRow label="Loading settings…" />;
+    content = (
+      <SettingsCard>
+        <SettingsRow label="Loading settings…" />
+      </SettingsCard>
+    );
   } else if (settings.status === "error") {
     content = (
-      <>
-        <SettingsRow label="Could not load settings" hint={settings.error} />
-        <SettingsAction label="Reload" hint="Try reading settings again." actionLabel="Reload" onPress={() => void settings.reload()} disabled={settings.saving} />
-      </>
+      <SettingsCard>
+        <SettingsAction
+          label="Could not load settings"
+          error={settings.error}
+          actionLabel="Reload"
+          onPress={() => void settings.reload()}
+          disabled={settings.saving}
+        />
+      </SettingsCard>
     );
   } else if (settings.status === "invalid") {
     content = (
-      <>
-        <SettingsRow label="Stored settings are invalid" hint={`${settings.error} · Reset to defaults to continue.`} />
-        <SettingsAction label="Reset to defaults" hint="Discards the stored settings document." actionLabel="Reset" onPress={() => void settings.reset()} disabled={settings.saving} />
-      </>
+      <SettingsCard>
+        <SettingsAction
+          label="Stored settings are invalid"
+          hint="Reset to defaults to continue. This discards the stored settings document."
+          error={settings.error}
+          actionLabel="Reset"
+          onPress={() => void settings.reset()}
+          disabled={settings.saving}
+        />
+      </SettingsCard>
     );
   } else {
     const values = committer.working ?? settings.values;
     const repoList = repos.data?.repos ?? [];
     const errors = committer.errors;
+    const provider = values.decision.provider;
+    const background = values.precompute;
+    const rulesWithoutRepos = values.reviewDepth.rules.some((rule) => rule.enabled) && values.decisionRepos.length === 0;
+
+    let backgroundStatus = "Loading…";
+    if (precomputeStatus.isError) backgroundStatus = "Could not load status.";
+    if (precomputeStatus.data) {
+      const status = precomputeStatus.data;
+      const parts = [status.lastRunAt ? `Last run ${agoLabel(status.lastRunAt)}` : "Not run yet", `${status.queued} queued`];
+      if (background.agentSummaries) parts.push(`${status.agentJobsToday} of ${background.maxAgentJobsPerDay} agent summaries today`);
+      backgroundStatus = parts.join(" · ");
+    }
 
     content = (
       <>
-        <SettingsGroup title="Decision model" info="Used for validators, module assignment, risk/severity scoring, and attention ranking.">
-          <SettingsSelect
-            label="Provider"
-            value={values.decision.provider}
-            options={PROVIDER_OPTIONS}
-            onValueChange={(provider) => committer.commit("decision.provider", (v) => ({ ...v, decision: { ...v.decision, provider } }))}
-          />
-          <SettingsInput
-            label="Model"
-            hint="Empty = provider default: typesafe/jev-1.13 (OpenRouter), clef-flash (Cloudflare), jev-latest (TypeSafe)."
-            error={errors["decision.model"] ?? null}
-            initialValue={values.decision.model}
-            onChangeText={(model) => committer.schedule("decision.model", (v) => ({ ...v, decision: { ...v.decision, model } }), SAVE_DEBOUNCE_MS)}
-          />
-          <SettingsInput
-            label="Endpoint URL override"
-            hint="Overrides the URL for any provider: self-hosted Jev-compatible API, OpenRouter alpha decisions endpoint, or Cloudflare AI Gateway."
-            error={errors["decision.endpointUrl"] ?? null}
-            initialValue={values.decision.endpointUrl}
-            onChangeText={(endpointUrl) =>
-              committer.schedule("decision.endpointUrl", (v) => ({ ...v, decision: { ...v.decision, endpointUrl } }), SAVE_DEBOUNCE_MS)
-            }
-          />
-          <SettingsInput
-            label="Cloudflare account ID"
-            error={errors["decision.cloudflareAccountId"] ?? null}
-            initialValue={values.decision.cloudflareAccountId}
-            onChangeText={(cloudflareAccountId) =>
-              committer.schedule("decision.cloudflareAccountId", (v) => ({ ...v, decision: { ...v.decision, cloudflareAccountId } }), SAVE_DEBOUNCE_MS)
-            }
-          />
-          <SettingsInput
-            label="API key"
-            hint="OpenRouter key by default. Or set daemon env vars: OPENROUTER_API_KEY, CLOUDFLARE_API_TOKEN, TYPESAFE_API_KEY, SYSTEMONE_API_KEY."
-            error={errors["decision.apiKey"] ?? null}
-            initialValue={values.decision.apiKey}
-            onChangeText={(apiKey) => committer.schedule("decision.apiKey", (v) => ({ ...v, decision: { ...v.decision, apiKey } }), SAVE_DEBOUNCE_MS)}
-            secureTextEntry
-          />
-          <NumberSettingsInput
-            fieldKey="decision.concurrency"
-            label="Concurrency"
-            hint="1–32 concurrent decision requests."
-            value={values.decision.concurrency}
-            min={1}
-            max={32}
-            error={errors["decision.concurrency"] ?? null}
-            onError={(message) => committer.setValidationError("decision.concurrency", message)}
-            onValid={(concurrency) =>
-              committer.schedule("decision.concurrency", (v) => ({ ...v, decision: { ...v.decision, concurrency } }), SAVE_DEBOUNCE_MS)
-            }
-          />
-        </SettingsGroup>
+        {settings.saveError && (
+          <View style={{ marginBottom: space.xl }}>
+            <SettingsCard>
+              <SettingsRow label="Could not save settings" error={settings.saveError} />
+            </SettingsCard>
+          </View>
+        )}
 
-        <SettingsGroup title="Repos sending code to the decision API" info="Off by default. When off for a repo, analysis falls back to heuristics only and validators are unavailable for it.">
-          {repos.isPending && <SettingsRow label="Loading repos…" />}
-          {repos.isError && <SettingsRow label="Could not load repos" />}
-          {repoList.length === 0 && !repos.isPending && (
-            <SettingsRow label="No repos yet" hint="Add a repo as a Paseo project with a github.com remote to see it here." />
-          )}
-          {repoList.map((repo) => (
-            <SettingsSwitch
-              key={repo.slug}
-              label={repo.slug}
-              value={values.decisionRepos.includes(repo.slug)}
-              onValueChange={(enabled) =>
-                committer.commit(`decisionRepos.${repo.slug}`, (v) => ({
-                  ...v,
-                  decisionRepos: enabled ? [...v.decisionRepos, repo.slug] : v.decisionRepos.filter((slug) => slug !== repo.slug),
-                }))
-              }
+        <SettingsGroup title="Reviewing" info="Defaults for every PR. Reading order and diff layout can also be switched from the PR screen.">
+          <SettingsCard>
+            <SettingsSelect
+              label="Reading order"
+              hint="How files are ordered within each module."
+              value={values.readingOrder}
+              options={READING_ORDER_OPTIONS}
+              onValueChange={(readingOrder) => committer.commit("readingOrder", (v) => ({ ...v, readingOrder }))}
             />
-          ))}
+            <SettingsSelect
+              label="Diff layout"
+              value={values.diffLayout}
+              options={DIFF_LAYOUT_OPTIONS}
+              onValueChange={(diffLayout) => committer.commit("diffLayout", (v) => ({ ...v, diffLayout }))}
+            />
+            <SettingsSelect
+              label="Code density"
+              hint="Text size and row height in diffs."
+              value={values.diffDensity}
+              options={DIFF_DENSITY_OPTIONS}
+              onValueChange={(diffDensity) => committer.commit("diffDensity", (v) => ({ ...v, diffDensity }))}
+            />
+          </SettingsCard>
         </SettingsGroup>
 
         <SettingsGroup
@@ -429,7 +436,7 @@ export function SettingsScreen(props: PluginSurfaceProps): ReactNode {
           info={
             "Each rule is a plain-language condition the decision model checks against every module. Matching " +
             "modules open at that depth; when several match, the deepest one wins. With no rules — or for repos " +
-            "not opted in to the decision model above — PR Review falls back to its built-in default: noise " +
+            "not allowed to send code under Decision model — PR Review falls back to its built-in default: noise " +
             "modules open at Files, high-risk modules at Code, large modules with declaration outlines at " +
             "Declarations, and everything else at Code."
           }
@@ -481,129 +488,255 @@ export function SettingsScreen(props: PluginSurfaceProps): ReactNode {
               committer.commit("reviewDepth.rules", (v) => ({ ...v, reviewDepth: { rules: STARTER_DEPTH_RULES } }))
             }
           />
-        </SettingsGroup>
-
-        <SettingsGroup title="Agent defaults" info="Which agent profile or model each task uses by default.">
-          {agentChoices.isPending && <SettingsRow label="Loading agent choices…" />}
-          {AGENT_TASKS.map((task) => (
-            <SettingsSelect
-              key={task.key}
-              label={task.label}
-              value={values.agents[task.key]}
-              options={agentOptions}
-              onValueChange={(choiceId) => committer.commit(`agents.${task.key}`, (v) => ({ ...v, agents: { ...v.agents, [task.key]: choiceId } }))}
-              disabled={agentChoices.isPending}
-            />
-          ))}
-        </SettingsGroup>
-
-        <SettingsGroup title="Precompute status" info="Read-only status from the background scheduler.">
-          {precomputeStatus.isPending && <SettingsRow label="Loading status…" />}
-          {precomputeStatus.isError && <SettingsRow label="Could not load precompute status" />}
-          {precomputeStatus.data && (
-            <>
-              <SettingsRow label="Scheduler" hint={precomputeStatus.data.enabled ? "Enabled" : "Disabled"} />
-              <SettingsRow label="Last run" hint={precomputeStatus.data.lastRunAt ?? "Never"} />
-              <SettingsRow label="Queued PRs" hint={String(precomputeStatus.data.queued)} />
-              <SettingsRow label="Agent jobs today" hint={`${precomputeStatus.data.agentJobsToday} / ${values.precompute.maxAgentJobsPerDay}`} />
-              {precomputeStatus.data.lastError && <SettingsRow label="Last error" error={precomputeStatus.data.lastError} />}
-            </>
+          {rulesWithoutRepos && (
+            <Text style={{ ...font.small, color: c.foregroundMuted, marginTop: space.sm, marginLeft: space.xs }}>
+              Rules only apply to repos allowed to send code under Decision model, and none are allowed yet.
+            </Text>
           )}
         </SettingsGroup>
 
-        <SettingsGroup title="Precompute" info="Background analysis for PRs that need your attention, so they open instantly.">
-          <SettingsSwitch
-            label="Enabled"
-            value={values.precompute.enabled}
-            onValueChange={(enabled) => committer.commit("precompute.enabled", (v) => ({ ...v, precompute: { ...v.precompute, enabled } }))}
-          />
-          <NumberSettingsInput
-            fieldKey="precompute.intervalMinutes"
-            label="Interval (minutes)"
-            hint="2–240 minutes."
-            value={values.precompute.intervalMinutes}
-            min={2}
-            max={240}
-            error={errors["precompute.intervalMinutes"] ?? null}
-            onError={(message) => committer.setValidationError("precompute.intervalMinutes", message)}
-            onValid={(intervalMinutes) =>
-              committer.schedule("precompute.intervalMinutes", (v) => ({ ...v, precompute: { ...v.precompute, intervalMinutes } }), SAVE_DEBOUNCE_MS)
-            }
-          />
-          <SettingsSwitch
-            label="Agent summaries during precompute"
-            hint="Uses the daily agent job budget below."
-            value={values.precompute.agentSummaries}
-            onValueChange={(agentSummaries) =>
-              committer.commit("precompute.agentSummaries", (v) => ({ ...v, precompute: { ...v.precompute, agentSummaries } }))
-            }
-          />
-          <NumberSettingsInput
-            fieldKey="precompute.maxAgentJobsPerDay"
-            label="Max agent jobs per day"
-            hint="0–200."
-            value={values.precompute.maxAgentJobsPerDay}
-            min={0}
-            max={200}
-            error={errors["precompute.maxAgentJobsPerDay"] ?? null}
-            onError={(message) => committer.setValidationError("precompute.maxAgentJobsPerDay", message)}
-            onValid={(maxAgentJobsPerDay) =>
-              committer.schedule("precompute.maxAgentJobsPerDay", (v) => ({ ...v, precompute: { ...v.precompute, maxAgentJobsPerDay } }), SAVE_DEBOUNCE_MS)
-            }
-          />
-          <SettingsSwitch
-            label="Skip drafts"
-            value={values.precompute.skipDrafts}
-            onValueChange={(skipDrafts) => committer.commit("precompute.skipDrafts", (v) => ({ ...v, precompute: { ...v.precompute, skipDrafts } }))}
-          />
-          <NumberSettingsInput
-            fieldKey="precompute.maxFiles"
-            label="Max files"
-            hint="Size cap (10–5000 files) above which precompute skips a PR."
-            value={values.precompute.maxFiles}
-            min={10}
-            max={5000}
-            error={errors["precompute.maxFiles"] ?? null}
-            onError={(message) => committer.setValidationError("precompute.maxFiles", message)}
-            onValid={(maxFiles) => committer.schedule("precompute.maxFiles", (v) => ({ ...v, precompute: { ...v.precompute, maxFiles } }), SAVE_DEBOUNCE_MS)}
-          />
+        <SettingsGroup
+          title="Decision model"
+          info="Answers typed questions for validators, module assignment, risk and severity scoring, attention ranking, and review depth. Code is only sent for the repos you allow."
+        >
+          <SettingsSection title="Connection">
+            <SettingsCard>
+              <SettingsSelect
+                key="provider"
+                label="Provider"
+                value={provider}
+                options={PROVIDER_OPTIONS}
+                onValueChange={(next) => committer.commit("decision.provider", (v) => ({ ...v, decision: { ...v.decision, provider: next } }))}
+              />
+              <SettingsInput
+                key="apiKey"
+                label={provider === "cloudflare" ? "API token" : "API key"}
+                hint={API_KEY_HINTS[provider]}
+                error={errors["decision.apiKey"] ?? null}
+                initialValue={values.decision.apiKey}
+                onChangeText={(apiKey) => committer.schedule("decision.apiKey", (v) => ({ ...v, decision: { ...v.decision, apiKey } }), SAVE_DEBOUNCE_MS)}
+                secureTextEntry
+              />
+              <SettingsInput
+                key="model"
+                label="Model"
+                hint={`Leave empty to use ${DEFAULT_DECISION_MODELS[provider]}.`}
+                error={errors["decision.model"] ?? null}
+                initialValue={values.decision.model}
+                onChangeText={(model) => committer.schedule("decision.model", (v) => ({ ...v, decision: { ...v.decision, model } }), SAVE_DEBOUNCE_MS)}
+              />
+              {provider === "cloudflare" && (
+                <SettingsInput
+                  key="cloudflareAccountId"
+                  label="Cloudflare account ID"
+                  hint="Or set CLOUDFLARE_ACCOUNT_ID on the daemon host. Not needed with an endpoint URL override."
+                  error={errors["decision.cloudflareAccountId"] ?? null}
+                  initialValue={values.decision.cloudflareAccountId}
+                  onChangeText={(cloudflareAccountId) =>
+                    committer.schedule("decision.cloudflareAccountId", (v) => ({ ...v, decision: { ...v.decision, cloudflareAccountId } }), SAVE_DEBOUNCE_MS)
+                  }
+                />
+              )}
+              {provider === "custom" && (
+                <SettingsInput
+                  key="endpointUrl"
+                  label="Endpoint URL"
+                  hint="Any System One–compatible decision API."
+                  error={errors["decision.endpointUrl"] ?? null}
+                  initialValue={values.decision.endpointUrl}
+                  onChangeText={(endpointUrl) =>
+                    committer.schedule("decision.endpointUrl", (v) => ({ ...v, decision: { ...v.decision, endpointUrl } }), SAVE_DEBOUNCE_MS)
+                  }
+                />
+              )}
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Repos allowed to send code"
+            info="Off by default. For repos left off, analysis uses heuristics only, review-depth rules don't apply, and validators are unavailable."
+          >
+            <SettingsCard>
+              {repos.isPending && <SettingsRow label="Loading repos…" />}
+              {repos.isError && <SettingsRow label="Could not load repos" />}
+              {repos.isSuccess && repoList.length === 0 && (
+                <SettingsRow label="No repos yet" hint="Add a repo as a Paseo project with a github.com remote to see it here." />
+              )}
+              {repoList.map((repo) => (
+                <SettingsSwitch
+                  key={repo.slug}
+                  label={repo.slug}
+                  value={values.decisionRepos.includes(repo.slug)}
+                  onValueChange={(enabled) =>
+                    committer.commit(`decisionRepos.${repo.slug}`, (v) => ({
+                      ...v,
+                      decisionRepos: enabled ? [...v.decisionRepos, repo.slug] : v.decisionRepos.filter((slug) => slug !== repo.slug),
+                    }))
+                  }
+                />
+              ))}
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection title="Advanced">
+            <SettingsCard>
+              {provider !== "custom" && (
+                <SettingsInput
+                  key="endpointUrl"
+                  label="Endpoint URL override"
+                  hint="Replaces the provider's URL, e.g. a self-hosted Jev-compatible API or a Cloudflare AI Gateway."
+                  error={errors["decision.endpointUrl"] ?? null}
+                  initialValue={values.decision.endpointUrl}
+                  onChangeText={(endpointUrl) =>
+                    committer.schedule("decision.endpointUrl", (v) => ({ ...v, decision: { ...v.decision, endpointUrl } }), SAVE_DEBOUNCE_MS)
+                  }
+                />
+              )}
+              <NumberSettingsInput
+                key="concurrency"
+                fieldKey="decision.concurrency"
+                label="Parallel requests"
+                hint="How many decision requests run at once (1–32)."
+                value={values.decision.concurrency}
+                min={1}
+                max={32}
+                error={errors["decision.concurrency"] ?? null}
+                onError={(message) => committer.setValidationError("decision.concurrency", message)}
+                onValid={(concurrency) =>
+                  committer.schedule("decision.concurrency", (v) => ({ ...v, decision: { ...v.decision, concurrency } }), SAVE_DEBOUNCE_MS)
+                }
+              />
+            </SettingsCard>
+          </SettingsSection>
         </SettingsGroup>
 
-        <SettingsGroup title="Reading and diff">
-          <SettingsSelect
-            label="Default reading order"
-            value={values.readingOrder}
-            options={READING_ORDER_OPTIONS}
-            onValueChange={(readingOrder) => committer.commit("readingOrder", (v) => ({ ...v, readingOrder }))}
-          />
-          <SettingsSelect
-            label="Default diff layout"
-            value={values.diffLayout}
-            options={DIFF_LAYOUT_OPTIONS}
-            onValueChange={(diffLayout) => committer.commit("diffLayout", (v) => ({ ...v, diffLayout }))}
-          />
-          <SettingsSelect
-            label="Diff density"
-            value={values.diffDensity}
-            options={DIFF_DENSITY_OPTIONS}
-            onValueChange={(diffDensity) => committer.commit("diffDensity", (v) => ({ ...v, diffDensity }))}
-          />
+        <SettingsGroup
+          title="Agents"
+          info="Which agent profile or model each task uses. First available = your first saved agent profile, otherwise the first ready model."
+        >
+          <SettingsCard>
+            {agentChoices.isPending && <SettingsRow label="Loading agents…" />}
+            {agentChoices.isError && <SettingsRow label="Could not load agents" hint="Only First available can be chosen until they load." />}
+            {AGENT_TASKS.map((task) => (
+              <SettingsSelect
+                key={task.key}
+                label={task.label}
+                hint={task.hint}
+                value={values.agents[task.key]}
+                options={agentOptions}
+                onValueChange={(choiceId) => committer.commit(`agents.${task.key}`, (v) => ({ ...v, agents: { ...v.agents, [task.key]: choiceId } }))}
+                disabled={agentChoices.isPending}
+              />
+            ))}
+          </SettingsCard>
         </SettingsGroup>
 
-        {settings.saveError && <SettingsRow label="Could not save settings" error={settings.saveError} />}
+        <SettingsGroup title="Background analysis" info="Analyzes PRs that need your attention ahead of time, so they open instantly.">
+          <SettingsCard>
+            <SettingsSwitch
+              key="enabled"
+              label="Analyze PRs in the background"
+              value={background.enabled}
+              onValueChange={(enabled) => {
+                if (!enabled) {
+                  // The fields below unmount; don't leave their validation errors behind.
+                  for (const key of ["precompute.intervalMinutes", "precompute.maxFiles", "precompute.maxAgentJobsPerDay"]) {
+                    committer.setValidationError(key, null);
+                  }
+                }
+                committer.commit("precompute.enabled", (v) => ({ ...v, precompute: { ...v.precompute, enabled } }));
+              }}
+            />
+            {background.enabled && <SettingsRow key="status" label="Status" hint={backgroundStatus} error={precomputeStatus.data?.lastError ?? null} />}
+            {background.enabled && (
+              <NumberSettingsInput
+                key="intervalMinutes"
+                fieldKey="precompute.intervalMinutes"
+                label="Check every (minutes)"
+                hint="2–240 minutes."
+                value={background.intervalMinutes}
+                min={2}
+                max={240}
+                error={errors["precompute.intervalMinutes"] ?? null}
+                onError={(message) => committer.setValidationError("precompute.intervalMinutes", message)}
+                onValid={(intervalMinutes) =>
+                  committer.schedule("precompute.intervalMinutes", (v) => ({ ...v, precompute: { ...v.precompute, intervalMinutes } }), SAVE_DEBOUNCE_MS)
+                }
+              />
+            )}
+            {background.enabled && (
+              <SettingsSwitch
+                key="skipDrafts"
+                label="Skip draft PRs"
+                value={background.skipDrafts}
+                onValueChange={(skipDrafts) => committer.commit("precompute.skipDrafts", (v) => ({ ...v, precompute: { ...v.precompute, skipDrafts } }))}
+              />
+            )}
+            {background.enabled && (
+              <NumberSettingsInput
+                key="maxFiles"
+                fieldKey="precompute.maxFiles"
+                label="Skip PRs with more files than"
+                hint="10–5000 files."
+                value={background.maxFiles}
+                min={10}
+                max={5000}
+                error={errors["precompute.maxFiles"] ?? null}
+                onError={(message) => committer.setValidationError("precompute.maxFiles", message)}
+                onValid={(maxFiles) => committer.schedule("precompute.maxFiles", (v) => ({ ...v, precompute: { ...v.precompute, maxFiles } }), SAVE_DEBOUNCE_MS)}
+              />
+            )}
+            {background.enabled && (
+              <SettingsSwitch
+                key="agentSummaries"
+                label="Write agent summaries"
+                hint="Also generates each PR's Overview summary with the Summary agent, up to a daily limit."
+                value={background.agentSummaries}
+                onValueChange={(agentSummaries) => {
+                  if (!agentSummaries) committer.setValidationError("precompute.maxAgentJobsPerDay", null);
+                  committer.commit("precompute.agentSummaries", (v) => ({ ...v, precompute: { ...v.precompute, agentSummaries } }));
+                }}
+              />
+            )}
+            {background.enabled && background.agentSummaries && (
+              <NumberSettingsInput
+                key="maxAgentJobsPerDay"
+                fieldKey="precompute.maxAgentJobsPerDay"
+                label="Agent summaries per day"
+                hint="0–200."
+                value={background.maxAgentJobsPerDay}
+                min={0}
+                max={200}
+                error={errors["precompute.maxAgentJobsPerDay"] ?? null}
+                onError={(message) => committer.setValidationError("precompute.maxAgentJobsPerDay", message)}
+                onValid={(maxAgentJobsPerDay) =>
+                  committer.schedule("precompute.maxAgentJobsPerDay", (v) => ({ ...v, precompute: { ...v.precompute, maxAgentJobsPerDay } }), SAVE_DEBOUNCE_MS)
+                }
+              />
+            )}
+          </SettingsCard>
+        </SettingsGroup>
 
         <SettingsGroup title="About">
-          <SettingsRow label="Documentation" hint="Decision model adapters, validators format, and the review experience." />
-          <ExternalLink href="https://github.com/getpaseo/pr-review">pr-review on GitHub</ExternalLink>
-          <SettingsAction label="Reset to defaults" actionLabel="Reset" onPress={() => void settings.reset()} disabled={settings.saving} />
+          <SettingsCard>
+            <SettingsRow label="Documentation" hint="Decision model setup, the validator format, and the review experience.">
+              <ExternalLink href="https://github.com/getpaseo/pr-review">pr-review on GitHub</ExternalLink>
+            </SettingsRow>
+          </SettingsCard>
         </SettingsGroup>
+
+        <SettingsCard>
+          <SettingsAction
+            label="Reset all settings"
+            hint="Restores every PR Review setting to its default, including review-depth rules, allowed repos, and the API key."
+            actionLabel="Reset"
+            onPress={() => void settings.reset()}
+            disabled={settings.saving}
+          />
+        </SettingsCard>
       </>
     );
   }
 
-  return (
-    <ScrollView contentContainerStyle={{ paddingVertical: 8, paddingHorizontal: 16, gap: 12 }}>
-      {content}
-    </ScrollView>
-  );
+  return <ScrollView contentContainerStyle={{ paddingVertical: space.lg, paddingHorizontal: space.lg }}>{content}</ScrollView>;
 }
