@@ -149,6 +149,23 @@ html, body { margin: 0; padding: 0; background: ${c.surface0}; }
   height: auto;
 }
 
+.markdown-body video {
+  max-width: 100%;
+}
+
+.markdown-body .prr-mermaid-diagram {
+  margin: 14px 0;
+  overflow-x: auto;
+}
+.markdown-body .prr-mermaid-diagram svg {
+  max-width: 100%;
+}
+.markdown-body .prr-mermaid-error {
+  color: ${c.statusDanger};
+  font-size: 12px;
+  margin-top: 6px;
+}
+
 .markdown-body details > summary {
   cursor: pointer;
 }

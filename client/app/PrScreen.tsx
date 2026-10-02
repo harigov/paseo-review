@@ -4,13 +4,14 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { openExternalUrl } from "@getpaseo/plugin/client";
-import { useAnalysis, useJobRunner, usePr } from "../data/hooks";
+import { findInboxSummary, useAnalysis, useJobRunner, usePr } from "../data/hooks";
 import { prAnalyzeRpc } from "../../shared/rpc";
 import { prReviewSettings } from "../../shared/settings";
 import type { DiffLayout, ReadingOrder } from "../../shared/types";
 import { font, radius, space, surfaces, weight, type DiffDensity } from "../ui/tokens";
 import { ErrorState, InlineLoading, Skeleton } from "../ui/states";
-import type { PrTabContext } from "../pr/tab-props";
+import type { ChatContext, PrTabContext } from "../pr/tab-props";
+import { useDepthSync } from "../review/depth-sync";
 import { Dot, riskColor } from "../ui/chips";
 import { useDrafts } from "../review/drafts";
 import { OverviewTab } from "./OverviewTab";
@@ -69,7 +70,7 @@ export function PrScreen(
   const [panelTab, setPanelTab] = useState<"status" | "chat">("status");
   const [chatMounted, setChatMounted] = useState(false);
   const [chatModalOpen, setChatModalOpen] = useState(false);
-  const [chatSeed, setChatSeed] = useState<{ seed: string; key: string } | null>(null);
+  const [chatContext, setChatContext] = useState<{ context: ChatContext; key: string } | null>(null);
 
   // Seed per-session view preferences from settings once they load; later toggles stay local.
   useEffect(() => {
@@ -83,6 +84,9 @@ export function PrScreen(
 
   const detail = detailQuery.data ?? null;
   const analysis = analysisQuery.data?.analysis ?? null;
+
+  // Keeps modules' rule-based review depth in step with Settings → Review depth.
+  useDepthSync({ repo, number, analysis, refetchAnalysis: analysisQuery.refetch });
 
   // The inbox only knows repo/number when it opens a PR; refresh the recents entry with the title.
   const title = detail?.summary.title;
@@ -132,11 +136,11 @@ export function PrScreen(
   }, [analyzeRunner, prAnalyze, repo, number, detailQuery, analysisQuery, toast]);
 
   // Chat happens in the side panel (or a modal on compact layouts), not in the agent view; the
-  // panel itself starts or reuses the PR's agent. A seed (e.g. "Ask about this module") is sent
-  // once the agent is ready.
+  // panel itself starts or reuses the PR's agent. Context (e.g. "Ask about this module") is
+  // attached to the composer and only goes out with the user's own question.
   const openChat = useCallback(
-    (seed?: string) => {
-      if (seed) setChatSeed({ seed, key: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
+    (input?: { context?: ChatContext }) => {
+      if (input?.context) setChatContext({ context: input.context, key: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
       setChatMounted(true);
       if (layout.compact) {
         setChatModalOpen(true);
@@ -226,6 +230,31 @@ export function PrScreen(
   ];
 
   if (detailQuery.isPending) {
+    // An inbox summary for this PR (from the list, or from a surface reopening on its last PR)
+    // lets the real header render instantly instead of a generic skeleton — only the body (tabs,
+    // diff, etc., which need the full detail) stays skeletal.
+    const pendingSummary = findInboxSummary(repo, number);
+    if (pendingSummary) {
+      return (
+        <View style={{ flex: 1, backgroundColor: c.surface0 }}>
+          <View style={{ padding: space.md, gap: space.sm, borderBottomWidth: 1, borderColor: c.border }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+              <Pressable accessibilityRole="button" onPress={onBack} style={{ padding: 4 }}>
+                <Icon name="ChevronLeft" size={18} color={c.foreground} />
+              </Pressable>
+              <Text numberOfLines={1} style={{ flex: 1, color: c.foreground, ...font.heading }}>
+                {pendingSummary.title}
+              </Text>
+            </View>
+            <Text style={{ ...font.small, color: c.foregroundMuted }}>
+              {repo}#{number} · {pendingSummary.state}
+              {pendingSummary.isDraft ? " · Draft" : ""} · {pendingSummary.baseRef} ← {pendingSummary.headRef}
+            </Text>
+          </View>
+          <Skeleton theme={theme} rows={8} />
+        </View>
+      );
+    }
     return (
       <View style={{ flex: 1, backgroundColor: c.surface0 }}>
         <View style={{ borderBottomWidth: 1, borderColor: c.border }}>
@@ -458,8 +487,8 @@ export function PrScreen(
                     prUrl={summary.url}
                     theme={theme}
                     navigation={navigation}
-                    seed={chatSeed?.seed}
-                    seedKey={chatSeed?.key}
+                    context={chatContext?.context ?? null}
+                    contextKey={chatContext?.key}
                   />
                 </ErrorBoundary>
               </View>
@@ -484,8 +513,8 @@ export function PrScreen(
                     prUrl={summary.url}
                     theme={theme}
                     navigation={navigation}
-                    seed={chatSeed?.seed}
-                    seedKey={chatSeed?.key}
+                    context={chatContext?.context ?? null}
+                    contextKey={chatContext?.key}
                   />
                 </ErrorBoundary>
               )}

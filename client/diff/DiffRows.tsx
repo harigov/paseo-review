@@ -3,8 +3,9 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { HighlightToken } from "@getpaseo/highlight";
-import type { AnalyzedFile, DiffLine, Hunk, OutlineEntry, Thread } from "../../shared/types";
+import type { AnalyzedFile, DetailLevel, DiffLine, Hunk, OutlineEntry, Thread } from "../../shared/types";
 import { FILE_LINES_MAX } from "../../shared/rpc";
+import { DETAIL_LEVELS } from "../../shared/levels";
 import type { DraftComment } from "../review/drafts";
 import { Chip, riskColor } from "../ui/chips";
 import { EmptyState, ErrorState, Skeleton } from "../ui/states";
@@ -12,14 +13,21 @@ import { code as codeByDensity, font, radius, space, surfaces, withAlpha, type D
 import { Markdown } from "../render/Markdown";
 import { CONTEXT_PAGE_SIZE, type ContextGapPosition } from "./context";
 import { applySpansToTokens, type Span } from "./intraline";
-import { OutlineView } from "./OutlineView";
+import { changeColor, OutlineView } from "./OutlineView";
 import { StructuralDiffView } from "./StructuralDiffView";
 import { InlineComposer } from "./InlineComposer";
 import { expandTabs, markWhitespace } from "./pairing";
 import { formatHunkHeader, type Row, type Side } from "./rows";
 
 type Theme = PluginSurfaceProps["theme"];
+type ThemeColors = Theme["colors"];
 type Layout = PluginSurfaceProps["layout"];
+
+/** Rail colour for a file's position parity (see `Row.rail`): accent for the "even" file,
+ * a neutral tone for the "odd" one — never a risk colour, which would read as added/deleted. */
+function railColor(rail: 0 | 1, c: ThemeColors): string {
+  return rail === 0 ? c.accent : withAlpha(c.foregroundMuted, 0.5);
+}
 
 /** Everything a row renderer needs but can't carry itself (rows are plain data; this is the
  * live state/callback surface `ModuleTab` keeps). Nothing here may be a hook — rows render from
@@ -51,7 +59,13 @@ export interface StreamRowContext {
   /** "Viewed & next": marks `file` viewed, collapses it, and expands + scrolls to the next
    * not-fully-viewed file in reading order — same flow as the `v` keyboard shortcut. */
   onMarkViewedAndNext(file: AnalyzedFile): void;
-  onToggleExpand(path: string): void;
+  /** Pressing the file header (or `e` on the current file): toggles between "files" and this
+   * file's "open" level (see `openFileLevel` in rows.ts). */
+  onToggleFileOpen(path: string): void;
+  /** The compact F/D/C control: sets this file's level explicitly. */
+  onSetFileLevel(path: string, level: DetailLevel): void;
+  /** Declarations level: toggles a `decl` row's inline hunk drill-down. */
+  onToggleDecl(path: string, index: number): void;
   onOpenMove(path: string): void;
   onToggleOutline(path: string): void;
   onSelectOutlineEntry(path: string, entry: OutlineEntry): void;
@@ -290,16 +304,45 @@ function renderPairRow(row: Extract<Row, { type: "pair" }>, index: number, ctx: 
   );
 }
 
+/** Compact F / D / C control (the per-file equivalent of the module header's segmented level
+ * control): selecting a letter sets that file's level explicitly via `setFileLevel`. */
+function FileLevelPills({ level, c, onSelect }: { level: DetailLevel; c: ThemeColors; onSelect: (level: DetailLevel) => void }) {
+  return (
+    <View style={{ flexDirection: "row", gap: 2 }}>
+      {DETAIL_LEVELS.map((candidate) => (
+        <Pressable
+          key={candidate}
+          accessibilityRole="button"
+          onPress={() => onSelect(candidate)}
+          style={{
+            paddingHorizontal: 6,
+            paddingVertical: 2,
+            borderRadius: radius.sm,
+            backgroundColor: level === candidate ? c.accent : c.surface2,
+          }}
+        >
+          <Text style={{ ...font.caption, fontWeight: "600", color: level === candidate ? c.accentForeground : c.foregroundMuted }}>
+            {candidate === "files" ? "F" : candidate === "declarations" ? "D" : "C"}
+          </Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const { file } = row;
   const isCurrentFile = ctx.currentPath === row.path;
+  const isOpen = row.level !== "files";
   return (
     <View
       style={{
         backgroundColor: c.surface1,
         borderBottomWidth: 1,
         borderColor: withAlpha(c.border, 0.6),
+        borderTopWidth: 2,
+        borderTopColor: railColor(row.rail, c),
         flexDirection: "row",
         alignItems: "center",
         padding: space.sm,
@@ -311,7 +354,7 @@ function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: Stream
       <Pressable accessibilityRole="checkbox" onPress={() => ctx.onToggleViewed(file)}>
         <Icon name={row.viewed === "VIEWED" ? "CheckSquare" : "Square"} size={16} color={row.viewed === "VIEWED" ? c.statusSuccess : c.foregroundMuted} />
       </Pressable>
-      <Pressable accessibilityRole="button" onPress={() => ctx.onToggleExpand(row.path)} style={{ flex: 1, gap: 2 }}>
+      <Pressable accessibilityRole="button" onPress={() => ctx.onToggleFileOpen(row.path)} style={{ flex: 1, gap: 2 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, flexWrap: "wrap" }}>
           <Text style={{ ...font.body, fontWeight: "600", color: c.foreground }} numberOfLines={1}>
             {renamedLabel(file)}
@@ -321,9 +364,10 @@ function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: Stream
           <Text style={{ ...font.caption, color: c.statusDanger }}>−{file.deletions}</Text>
           {file.risk !== null ? <Chip label={`risk ${file.risk}`} color={riskColor(file.risk, c)} /> : null}
         </View>
-        {!row.expanded && row.outlineSummary ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{row.outlineSummary}</Text> : null}
+        {!isOpen && row.outlineSummary ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{row.outlineSummary}</Text> : null}
       </Pressable>
-      {row.expanded ? (
+      <FileLevelPills level={row.level} c={c} onSelect={(level) => ctx.onSetFileLevel(row.path, level)} />
+      {isOpen ? (
         <Pressable
           accessibilityRole="button"
           onPress={() => ctx.onMarkViewedAndNext(file)}
@@ -336,8 +380,8 @@ function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: Stream
       <Pressable accessibilityRole="button" onPress={() => ctx.onOpenMove(row.path)} style={{ padding: space.xs }}>
         <Icon name="FolderSymlink" size={14} color={c.foregroundMuted} />
       </Pressable>
-      <Pressable accessibilityRole="button" onPress={() => ctx.onToggleExpand(row.path)}>
-        <Icon name={row.expanded ? "ChevronDown" : "ChevronRight"} size={16} color={c.foregroundMuted} />
+      <Pressable accessibilityRole="button" onPress={() => ctx.onToggleFileOpen(row.path)}>
+        <Icon name={isOpen ? "ChevronDown" : "ChevronRight"} size={16} color={c.foregroundMuted} />
       </Pressable>
     </View>
   );
@@ -366,7 +410,7 @@ function renderFileMeta(row: Extract<Row, { type: "fileMeta" }>, ctx: StreamRowC
           </Text>
         </Pressable>
       ) : null}
-      {file.structuralKind ? (
+      {file.structuralKind && row.level === "code" ? (
         <View style={{ flexDirection: "row", gap: space.xs, marginLeft: "auto" }}>
           {(["text", "structure"] as const).map((candidate) => (
             <Pressable
@@ -401,6 +445,88 @@ function renderOutline(row: Extract<Row, { type: "outline" }>, ctx: StreamRowCon
         {row.summary ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{row.summary}</Text> : null}
       </Pressable>
       {row.expanded ? <OutlineView entries={row.entries} theme={ctx.theme} onSelect={(entry) => ctx.onSelectOutlineEntry(row.path, entry)} /> : null}
+    </View>
+  );
+}
+
+/** "L12–40", preferring the new range and falling back to the old one — same convention as
+ * `OutlineView`'s own label, duplicated here to keep this row renderer self-contained. */
+function declRangeLabel(entry: OutlineEntry): string | null {
+  const start = entry.newStart ?? entry.oldStart;
+  const end = entry.newEnd ?? entry.oldEnd;
+  if (start === null || end === null) return null;
+  return `L${start}–${end}`;
+}
+
+/** Declarations level: one row per changed declaration. Pressing it toggles an inline drill-down
+ * of the hunks overlapping its range, rendered directly below by the ordinary hunkHeader/line/
+ * pair renderers (`buildFileRows` in rows.ts emits those with decl-prefixed keys). */
+function renderDecl(row: Extract<Row, { type: "decl" }>, index: number, ctx: StreamRowContext): ReactElement | null {
+  const c = ctx.theme.colors;
+  const entry = row.entry;
+  const isCursor = ctx.cursorIndex === index;
+  const range = declRangeLabel(entry);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={() => ctx.onToggleDecl(row.path, row.index)}
+      style={{
+        paddingVertical: 6,
+        paddingHorizontal: space.sm,
+        backgroundColor: c.surface1,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: space.xs,
+        borderBottomWidth: 1,
+        borderColor: withAlpha(c.border, 0.4),
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
+    >
+      <Icon name={row.expanded ? "ChevronDown" : "ChevronRight"} size={12} color={c.foregroundMuted} />
+      <Chip label={entry.change} color={changeColor(entry.change, c)} />
+      <Text style={{ ...font.caption, color: c.foregroundMuted }}>{entry.kind}</Text>
+      <Text style={{ ...font.body, fontWeight: "600", color: c.foreground, flex: 1 }} numberOfLines={1}>
+        {entry.name}
+      </Text>
+      {entry.exported ? <Chip label="exported" color={c.accent} /> : null}
+      <Text style={{ ...font.caption, color: c.foregroundMuted }}>{`+/- ${entry.changedLines}`}</Text>
+      {range ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{range}</Text> : null}
+    </Pressable>
+  );
+}
+
+/** Declarations level, no outline for this file (unsupported language, or too large to parse). */
+function renderNoOutline(row: Extract<Row, { type: "noOutline" }>, ctx: StreamRowContext): ReactElement | null {
+  const c = ctx.theme.colors;
+  return (
+    <View style={{ padding: space.sm, backgroundColor: c.surface1, flexDirection: "row", alignItems: "center", gap: space.md }}>
+      <Text style={{ ...font.caption, color: c.foregroundMuted, flex: 1 }}>
+        No declaration outline for this file · {row.changedLines} changed lines
+      </Text>
+      <Pressable accessibilityRole="button" onPress={() => ctx.onSetFileLevel(row.path, "code")}>
+        <Text style={{ ...font.caption, color: c.accent }}>Show code</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** After every file whose level isn't "files": a closing marker plus "Viewed & next" — the
+ * natural place to act once a file is finished — followed by visible spacing before the next
+ * file's header (the spacing is this row's own bottom padding, so it scrolls with the content). */
+function renderFileEnd(row: Extract<Row, { type: "fileEnd" }>, ctx: StreamRowContext): ReactElement | null {
+  const c = ctx.theme.colors;
+  const { file } = row;
+  return (
+    <View style={{ padding: space.sm, paddingBottom: space.lg, backgroundColor: c.surface1, flexDirection: "row", alignItems: "center", gap: space.sm }}>
+      <Icon name="ArrowDown" size={12} color={c.foregroundMuted} />
+      <Text style={{ ...font.caption, color: c.foregroundMuted, flex: 1 }}>
+        End of {renamedLabel(file)} · +{file.additions} −{file.deletions}
+      </Text>
+      <Pressable accessibilityRole="button" onPress={() => ctx.onMarkViewedAndNext(file)} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        <Icon name="Check" size={12} color={c.accent} />
+        <Text style={{ ...font.caption, color: c.accent }}>Viewed &amp; next</Text>
+      </Pressable>
     </View>
   );
 }
@@ -668,10 +794,7 @@ function renderEmpty(row: Extract<Row, { type: "empty" }>, ctx: StreamRowContext
   );
 }
 
-/** Renders one row of the diff stream. Call from `FlatList`'s `renderItem` — this is a plain
- * function (not a hook-using component) so it can safely branch on `row.type`. `index` is the
- * row's position in the stream (needed for the keyboard cursor's accent border). */
-export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext): ReactElement | null {
+function renderRowContent(row: Row, index: number, ctx: StreamRowContext): ReactElement | null {
   switch (row.type) {
     case "fileHeader":
       return renderFileHeader(row, ctx);
@@ -679,6 +802,12 @@ export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext):
       return renderFileMeta(row, ctx);
     case "outline":
       return renderOutline(row, ctx);
+    case "decl":
+      return renderDecl(row, index, ctx);
+    case "noOutline":
+      return renderNoOutline(row, ctx);
+    case "fileEnd":
+      return renderFileEnd(row, ctx);
     case "structural":
       return renderStructural(row, ctx);
     case "truncated":
@@ -710,4 +839,16 @@ export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext):
     default:
       return null;
   }
+}
+
+/** Renders one row of the diff stream. Call from `FlatList`'s `renderItem` — this is a plain
+ * function (not a hook-using component) so it can safely branch on `row.type`. `index` is the
+ * row's position in the stream (needed for the keyboard cursor's accent border). Every row
+ * belonging to a file (i.e. every type but `empty`) is wrapped in its file's 3px rail border —
+ * see `Row.rail` in rows.ts — so a file boundary is visible down the whole stream, not just on
+ * the sticky header (which also gets a top edge in the same colour; see `renderFileHeader`). */
+export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext): ReactElement | null {
+  const content = renderRowContent(row, index, ctx);
+  if (row.type === "empty" || content === null) return content;
+  return <View style={{ borderLeftWidth: 3, borderLeftColor: railColor(row.rail, ctx.theme.colors) }}>{content}</View>;
 }

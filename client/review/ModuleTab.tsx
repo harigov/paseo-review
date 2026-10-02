@@ -16,11 +16,14 @@ import {
   fileViewedRpc,
   threadReplyRpc,
 } from "../../shared/rpc";
-import type { AnalyzedFile, FileDiff, Hunk, OutlineEntry, Thread, ViewedState } from "../../shared/types";
+import type { AnalyzedFile, DetailLevel, FileDiff, Hunk, OutlineEntry, Thread, ViewedState } from "../../shared/types";
+import { DETAIL_LEVELS, DETAIL_LEVEL_LABELS, resolveModuleLevel } from "../../shared/levels";
 import type { ModuleTabProps } from "../pr/tab-props";
 import {
   buildStreamRows,
+  defaultFileLevel,
   fileSegments,
+  openFileLevel,
   outlineSummary,
   stickyIndices,
   type ComposerTarget,
@@ -46,6 +49,8 @@ import {
 } from "../diff/keyboard";
 import { intralineForPairs, type Span } from "../diff/intraline";
 import { addDraft, removeDraft, updateDraft, useDrafts, type DraftComment } from "./drafts";
+import { setFileLevel, setModuleLevel, useDetailLevels, setFilePanelOpen, useFilePanelOpen } from "./levels";
+import { FilePanel, FilePanelModal, type FilePanelItem } from "./FilePanel";
 import { isDarkSurface } from "../ui/color";
 import { InlineLoading } from "../ui/states";
 import { font, space, surfaces } from "../ui/tokens";
@@ -61,9 +66,11 @@ function defaultViewMode(file: AnalyzedFile): FileViewMode {
   return "text";
 }
 
-/** The outline starts expanded for small outlines, collapsed for large ones. */
-function defaultOutlineExpanded(file: AnalyzedFile): boolean {
-  return (file.outline?.length ?? 0) <= 12;
+/** The Code-level outline list always starts collapsed — the file header already carries its
+ * summary; its own toggle still works. (Round 4: was size-dependent before Declarations level
+ * existed to show changed declarations without opening the outline block.) */
+function defaultOutlineExpanded(_file: AnalyzedFile): boolean {
+  return false;
 }
 
 /** Whether this file's diff needs to be fetched: `rows.ts` only renders the structural row (and
@@ -269,6 +276,12 @@ function rowPropsEqual(
       const key = `${row.path}:${row.position}:${row.hunkIndex}`;
       return a.contextPending.has(key) === b.contextPending.has(key);
     }
+    // These three depend only on the row's own data (and the cursor, already checked above) —
+    // nothing in `ctx` beyond the already-checked fields changes their rendered output.
+    case "decl":
+    case "noOutline":
+    case "fileEnd":
+      return true;
     default:
       return false;
   }
@@ -292,6 +305,7 @@ interface DomKeyboardEvent {
 
 const SHORTCUTS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "j / k", label: "Next / previous file" },
+  { key: "1 / 2 / 3", label: "Set the module's level: Files / Declarations / Code" },
   { key: "e", label: "Expand / collapse the current file" },
   { key: "v", label: "Mark the current file viewed, then go to the next unviewed file" },
   { key: "n", label: "Next unresolved thread or failing finding" },
@@ -302,6 +316,7 @@ const SHORTCUTS: ReadonlyArray<{ key: string; label: string }> = [
 ];
 
 const EMPTY_HUNK_SET: ReadonlySet<number> = new Set();
+const EMPTY_DECL_SET: ReadonlySet<number> = new Set();
 const EMPTY_CONTEXT_MAP: ReadonlyMap<number, string> = new Map();
 /** How long a second tap on "Delete" stays armed before reverting to the unarmed label. */
 const DELETE_CONFIRM_MS = 4_000;
@@ -328,16 +343,24 @@ export function ModuleTab(props: ModuleTabProps) {
   const headSha = detail?.summary.headSha ?? analysis?.headSha ?? "";
 
   const moduleInfo = analysis?.modules.find((m) => m.id === moduleId) ?? null;
-  const isNoiseModule = (moduleInfo?.title ?? "").toLowerCase() === "noise" || moduleId === "noise";
+
+  // Review depth (round 4): one level per module, plus per-file overrides, in an external store
+  // scoped to this PR (survives remounts; not persisted to disk) — see client/review/levels.ts.
+  // This replaces the old boolean `expanded` state: a file's effective level now resolves to
+  // `levels.files[path] ?? defaultFileLevel(...)` (computed in `fileLevelByPath` below), so there
+  // is nothing left to reset on a module switch the way `expanded`'s defaults used to be.
+  const levels = useDetailLevels(repo, number);
+  const filePanelOpen = useFilePanelOpen();
 
   const [viewedOverride, setViewedOverride] = useState<Record<string, ViewedState>>({});
   const [moduleOverride, setModuleOverride] = useState<Record<string, string>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [movingPath, setMovingPath] = useState<string | null>(null);
   const [sinceViewedPaths, setSinceViewedPaths] = useState<Set<string>>(new Set());
   const [outlineExpanded, setOutlineExpanded] = useState<Record<string, boolean>>({});
   const [viewMode, setViewMode] = useState<Record<string, FileViewMode>>({});
   const [expandedHunksByPath, setExpandedHunksByPath] = useState<Record<string, ReadonlySet<number>>>({});
+  const [declExpandedByPath, setDeclExpandedByPath] = useState<Record<string, ReadonlySet<number>>>({});
+  const [filesModalOpen, setFilesModalOpen] = useState(false);
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
   const [composerBody, setComposerBody] = useState("");
   const [composerBusy, setComposerBusy] = useState(false);
@@ -423,18 +446,26 @@ export function ModuleTab(props: ModuleTabProps) {
     [moduleFiles, sinceLastReview],
   );
 
-  // Recompute default expansion only when switching modules or the since-last-review filter.
-  useEffect(() => {
-    const defaults: Record<string, boolean> = {};
-    if (!isNoiseModule) {
-      visibleFiles.forEach((file) => {
-        defaults[file.path] = file.viewed !== "VIEWED" && file.effectiveLines <= 400;
-      });
-    }
-    setExpanded(defaults);
-    // Deliberately scoped to module/filter switches, not every data refresh.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [moduleId, sinceLastReview, isNoiseModule]);
+  // This module's effective level: the user's choice, else the decision model's recommendation
+  // (`moduleInfo.recommendedLevel` / `levelReason`), else the deterministic default — see
+  // shared/levels.ts. A module missing from `analysis.modules` (shouldn't normally happen) falls
+  // back to Code, the deepest level, rather than guessing at a stub's risk/line count.
+  const moduleLevelResult = useMemo(() => {
+    if (!moduleInfo) return { level: "code" as DetailLevel, source: "default" as const };
+    return resolveModuleLevel(levels.modules[moduleId] ?? null, moduleInfo, allFiles);
+  }, [moduleInfo, levels.modules, moduleId, allFiles]);
+
+  // Every visible file's effective level: a per-file override, else `defaultFileLevel` (VIEWED
+  // files collapse; huge Code-level files without an outline/structural view also collapse;
+  // otherwise the module's level) — replaces the old boolean `expanded` state entirely.
+  const fileLevelByPath = useMemo(() => {
+    const map = new Map<string, DetailLevel>();
+    visibleFiles.forEach((file) => {
+      const viewed = viewedOverride[file.path] ?? file.viewed;
+      map.set(file.path, levels.files[file.path] ?? defaultFileLevel(file, moduleLevelResult.level, viewed));
+    });
+    return map;
+  }, [visibleFiles, levels.files, moduleLevelResult.level, viewedOverride]);
 
   const viewModeByPath = useMemo(() => {
     const map = new Map<string, FileViewMode>();
@@ -486,11 +517,22 @@ export function ModuleTab(props: ModuleTabProps) {
     return map;
   }, [analysis]);
 
-  // Only expanded, text-mode files need their diff fetched; structure-mode files render via
-  // StructuralDiffView, which fetches independently.
+  // A Code-level, text-mode file needs its diff fetched (structure-mode files render via
+  // StructuralDiffView, which fetches independently); a Declarations-level file only needs it
+  // once at least one of its `decl` rows has been drilled into, and only when it actually has an
+  // outline to drill into (structural/binary files at Declarations never need the text diff).
   const filesNeedingDiff = useMemo(
-    () => visibleFiles.filter((file) => expanded[file.path] === true && needsTextDiff(file, viewModeByPath.get(file.path) ?? "text")),
-    [visibleFiles, expanded, viewModeByPath],
+    () =>
+      visibleFiles.filter((file) => {
+        const level = fileLevelByPath.get(file.path) ?? "files";
+        if (level === "code") return needsTextDiff(file, viewModeByPath.get(file.path) ?? "text");
+        if (level === "declarations") {
+          const expandedDecls = declExpandedByPath[file.path];
+          return !!expandedDecls && expandedDecls.size > 0 && !file.binary && !file.structuralKind && (file.outline?.length ?? 0) > 0;
+        }
+        return false;
+      }),
+    [visibleFiles, fileLevelByPath, viewModeByPath, declExpandedByPath],
   );
 
   // `combine` lets react-query structurally share its result across renders: when every query's
@@ -614,11 +656,12 @@ export function ModuleTab(props: ModuleTabProps) {
     () =>
       visibleFiles.map((file) => {
         const viewed = viewedOverride[file.path] ?? file.viewed;
-        const isExpanded = expanded[file.path] === true;
+        const level = fileLevelByPath.get(file.path) ?? "files";
+        const showAttachments = level !== "files"; // threads/drafts/findings only render once a file is open
         const mode = viewModeByPath.get(file.path) ?? "text";
         const diffEntry = diffByPath.get(file.path);
-        const fileThreads = isExpanded ? detail?.threads.filter((thread) => thread.path === file.path) ?? [] : [];
-        const fileFindings: FileDiffFinding[] = isExpanded
+        const fileThreads = showAttachments ? detail?.threads.filter((thread) => thread.path === file.path) ?? [] : [];
+        const fileFindings: FileDiffFinding[] = showAttachments
           ? (analysis?.validators ?? []).flatMap((result) =>
               result.findings
                 .filter((finding) => finding.path === file.path)
@@ -627,16 +670,17 @@ export function ModuleTab(props: ModuleTabProps) {
           : [];
         return {
           file,
-          expanded: isExpanded,
+          level,
           viewed,
           mode,
-          outlineExpanded: outlineExpandedByPath.get(file.path) ?? true,
+          outlineExpanded: outlineExpandedByPath.get(file.path) ?? false,
           outlineSummary: outlineSummary(file.outline ?? []),
           sinceViewedHighlighted: sinceViewedPaths.has(file.path),
           diffStatus: diffEntry?.status ?? "idle",
           diff: diffEntry?.diff ?? null,
           diffErrorMessage: diffEntry?.error ?? null,
           expandedHunks: expandedHunksByPath[file.path] ?? EMPTY_HUNK_SET,
+          expandedDecls: declExpandedByPath[file.path] ?? EMPTY_DECL_SET,
           totalLines: diffEntry?.diff?.totalLines ?? null,
           contextLines: contextFetchedByPath[file.path] ?? EMPTY_CONTEXT_MAP,
           threads: fileThreads,
@@ -647,7 +691,7 @@ export function ModuleTab(props: ModuleTabProps) {
     [
       visibleFiles,
       viewedOverride,
-      expanded,
+      fileLevelByPath,
       viewModeByPath,
       diffByPath,
       detail,
@@ -656,6 +700,7 @@ export function ModuleTab(props: ModuleTabProps) {
       outlineExpandedByPath,
       sinceViewedPaths,
       expandedHunksByPath,
+      declExpandedByPath,
       contextFetchedByPath,
     ],
   );
@@ -681,15 +726,18 @@ export function ModuleTab(props: ModuleTabProps) {
     return index === -1 ? null : index;
   }, [rows, cursorKey]);
 
-  // Prefetch the next unviewed file's diff as soon as a file expands, so paging through the
-  // module in reading order rarely shows a loading row. `staleTime` and the cache check keep a
-  // steady module (nothing newly expanded) from re-issuing the same prefetch every render.
+  // Prefetch the next unviewed file's diff as soon as a file is open at Code level, so paging
+  // through the module in reading order rarely shows a loading row. `staleTime` and the cache
+  // check keep a steady module (nothing newly opened) from re-issuing the same prefetch every
+  // render. Declarations-level files aren't prefetched speculatively: whether they'll need the
+  // diff at all depends on which (if any) `decl` row gets drilled into.
   useEffect(() => {
     visibleFiles.forEach((file) => {
-      if (expanded[file.path] !== true) return;
+      if ((fileLevelByPath.get(file.path) ?? "files") === "files") return;
       const index = visibleFiles.findIndex((candidate) => candidate.path === file.path);
       const next = visibleFiles.slice(index + 1).find((candidate) => (viewedOverride[candidate.path] ?? candidate.viewed) !== "VIEWED");
       if (!next) return;
+      if ((fileLevelByPath.get(next.path) ?? "files") !== "code") return;
       const nextMode = viewModeByPath.get(next.path) ?? defaultViewMode(next);
       if (!needsTextDiff(next, nextMode)) return;
       const nextViewed = viewedOverride[next.path] ?? next.viewed;
@@ -698,17 +746,18 @@ export function ModuleTab(props: ModuleTabProps) {
       if (queryClient.getQueryData(queryKey) !== undefined) return;
       void queryClient.prefetchQuery({ queryKey, queryFn: () => fileDiffFetcher({ repo, number, path: next.path, scope }), staleTime: 60_000 });
     });
-  }, [expanded, visibleFiles, viewedOverride, viewModeByPath, sinceViewedPaths, sinceLastReview, repo, number, queryClient, fileDiffFetcher]);
+  }, [fileLevelByPath, visibleFiles, viewedOverride, viewModeByPath, sinceViewedPaths, sinceLastReview, repo, number, queryClient, fileDiffFetcher]);
 
   function scrollToFile(path: string) {
     const index = rows.findIndex((row) => row.type === "fileHeader" && row.path === path);
     if (index !== -1) listRef.current?.scrollToIndex({ index, viewPosition: 0 });
   }
 
-  // `focusPath` (set by "Next unviewed" or the outline) asks this tab to expand a file and
-  // scroll its sticky header into view, then clear itself. Expanding can add rows ahead of this
-  // file's header (if an earlier file is also expanded), so the header's index is only looked
-  // up once `rows` has settled after the expansion commits.
+  // `focusPath` (set by "Next unviewed", the outline, or the file panel) asks this tab to open a
+  // file — to its "open" level (see `openFileLevel`) if it's currently collapsed — and scroll its
+  // sticky header into view, then clear itself. Opening can add rows ahead of this file's header
+  // (if an earlier file is also open), so the header's index is only looked up once `rows` has
+  // settled after the level change commits.
   useEffect(() => {
     if (!props.focusPath) {
       focusRetriedRef.current = false;
@@ -721,8 +770,9 @@ export function ModuleTab(props: ModuleTabProps) {
       props.setFocusPath(null);
       return;
     }
-    if (expanded[path] !== true) {
-      setExpanded((prev) => ({ ...prev, [path]: true }));
+    const level = fileLevelByPath.get(path) ?? "files";
+    if (level === "files") {
+      setFileLevel(repo, number, path, openFileLevel(match, moduleLevelResult.level));
       return;
     }
     const index = rows.findIndex((row) => row.type === "fileHeader" && row.path === path);
@@ -730,7 +780,7 @@ export function ModuleTab(props: ModuleTabProps) {
     listRef.current?.scrollToIndex({ index, viewPosition: 0 });
     props.setFocusPath(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.focusPath, visibleFiles, expanded, rows]);
+  }, [props.focusPath, visibleFiles, fileLevelByPath, moduleLevelResult.level, rows]);
 
   function handleScrollToIndexFailed(info: { index: number; averageItemLength: number }) {
     listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
@@ -836,19 +886,33 @@ export function ModuleTab(props: ModuleTabProps) {
     refresh();
   }
 
-  function toggleExpand(path: string) {
-    setExpanded((prev) => ({ ...prev, [path]: prev[path] !== true }));
+  /** Pressing a file header (or its chevron), or `e` on the current file: toggles between
+   * "files" (collapsed) and this file's "open" level (see `openFileLevel` in rows.ts). */
+  function toggleFileOpen(path: string) {
+    const file = visibleFiles.find((candidate) => candidate.path === path);
+    if (!file) return;
+    const level = fileLevelByPath.get(path) ?? "files";
+    setFileLevel(repo, number, path, level === "files" ? openFileLevel(file, moduleLevelResult.level) : "files");
+  }
+
+  function toggleDecl(path: string, index: number) {
+    setDeclExpandedByPath((prev) => {
+      const current = prev[path] ?? EMPTY_DECL_SET;
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return { ...prev, [path]: next };
+    });
   }
 
   function toggleOutline(path: string) {
-    const current = outlineExpandedByPath.get(path) ?? true;
+    const current = outlineExpandedByPath.get(path) ?? false;
     setOutlineExpanded((prev) => ({ ...prev, [path]: !current }));
   }
 
   function selectOutlineEntry(path: string, _entry: OutlineEntry) {
-    // v1: no scroll-to-line API in the stream yet, so selecting an outline row just makes sure
-    // the file's diff is visible in text mode.
-    setExpanded((prev) => ({ ...prev, [path]: true }));
+    // The outline block only shows at Code level (the file is already open there), so this just
+    // makes sure the diff is visible in text mode rather than the structural view.
     setViewMode((prev) => ({ ...prev, [path]: "text" }));
   }
 
@@ -1099,16 +1163,24 @@ export function ModuleTab(props: ModuleTabProps) {
     const row = rows[headerIndex];
     if (row.type !== "fileHeader") return false;
     markKeyboardNav();
-    if (expanded[row.path] !== true) setExpanded((prev) => ({ ...prev, [row.path]: true }));
+    if (row.level === "files") {
+      const file = visibleFiles.find((candidate) => candidate.path === row.path);
+      if (file) setFileLevel(repo, number, row.path, openFileLevel(file, moduleLevelResult.level));
+    }
     setCurrentPath(row.path);
     setCursorKey(null);
     requestScroll(headerIndex, 0);
     return true;
   }
 
-  function toggleExpandCurrent(): boolean {
+  function toggleCurrentFileOpen(): boolean {
     if (currentPath === null) return false;
-    toggleExpand(currentPath);
+    toggleFileOpen(currentPath);
+    return true;
+  }
+
+  function setModuleLevelViaKey(level: DetailLevel): boolean {
+    setModuleLevel(repo, number, moduleId, level, moduleFiles.map((file) => file.path));
     return true;
   }
 
@@ -1122,7 +1194,7 @@ export function ModuleTab(props: ModuleTabProps) {
    * whatever row happens to be there after the collapse, not the intended next file. */
   function markViewedAndNext(file: AnalyzedFile): void {
     void toggleViewed(file, true);
-    setExpanded((prev) => ({ ...prev, [file.path]: false }));
+    setFileLevel(repo, number, file.path, "files");
     const candidates = visibleFiles.map((candidate) => ({
       path: candidate.path,
       viewed: candidate.path === file.path ? ("VIEWED" as ViewedState) : viewedOverride[candidate.path] ?? candidate.viewed,
@@ -1173,7 +1245,10 @@ export function ModuleTab(props: ModuleTabProps) {
     markKeyboardNav();
     pendingUnresolvedTargetRef.current = nextPath;
     setCurrentPath(nextPath);
-    if (expanded[nextPath] !== true) setExpanded((prev) => ({ ...prev, [nextPath]: true }));
+    if ((fileLevelByPath.get(nextPath) ?? "files") === "files") {
+      const file = visibleFiles.find((candidate) => candidate.path === nextPath);
+      if (file) setFileLevel(repo, number, nextPath, openFileLevel(file, moduleLevelResult.level));
+    }
     return true;
   }
 
@@ -1227,7 +1302,8 @@ export function ModuleTab(props: ModuleTabProps) {
   const keyboardRef = useRef({
     composerOpen: composer !== null,
     goToFile,
-    toggleExpandCurrent,
+    toggleCurrentFileOpen,
+    setModuleLevelViaKey,
     markCurrentViewedAndNext,
     jumpHunk,
     jumpToUnresolved,
@@ -1238,7 +1314,8 @@ export function ModuleTab(props: ModuleTabProps) {
   keyboardRef.current = {
     composerOpen: composer !== null,
     goToFile,
-    toggleExpandCurrent,
+    toggleCurrentFileOpen,
+    setModuleLevelViaKey,
     markCurrentViewedAndNext,
     jumpHunk,
     jumpToUnresolved,
@@ -1288,7 +1365,16 @@ export function ModuleTab(props: ModuleTabProps) {
           consumed = actions.goToFile(-1);
           break;
         case "e":
-          consumed = actions.toggleExpandCurrent();
+          consumed = actions.toggleCurrentFileOpen();
+          break;
+        case "1":
+          consumed = actions.setModuleLevelViaKey("files");
+          break;
+        case "2":
+          consumed = actions.setModuleLevelViaKey("declarations");
+          break;
+        case "3":
+          consumed = actions.setModuleLevelViaKey("code");
           break;
         case "v":
           consumed = actions.markCurrentViewedAndNext();
@@ -1355,7 +1441,9 @@ export function ModuleTab(props: ModuleTabProps) {
     currentPath,
     onToggleViewed: (file) => void toggleViewed(file, (viewedOverride[file.path] ?? file.viewed) !== "VIEWED"),
     onMarkViewedAndNext: markViewedAndNext,
-    onToggleExpand: toggleExpand,
+    onToggleFileOpen: toggleFileOpen,
+    onSetFileLevel: (path, level) => setFileLevel(repo, number, path, level),
+    onToggleDecl: toggleDecl,
     onOpenMove: (path) => setMovingPath(path),
     onToggleOutline: toggleOutline,
     onSelectOutlineEntry: selectOutlineEntry,
@@ -1410,6 +1498,33 @@ export function ModuleTab(props: ModuleTabProps) {
   const otherModules = analysis?.modules.filter((m) => m.id !== moduleId) ?? [];
   const movingFile = movingPath ? moduleFiles.find((file) => file.path === movingPath) ?? null : null;
 
+  // Caption next to the module-level control: who picked it. The user's own choice needs no
+  // explanation beyond the selected pill; a rule or the deterministic default does.
+  const levelCaption =
+    moduleLevelResult.source === "rule"
+      ? `Recommended · ${moduleInfo?.levelReason ?? ""}`
+      : moduleLevelResult.source === "default"
+        ? "Default"
+        : null;
+
+  const filePanelItems: FilePanelItem[] = visibleFiles.map((file) => {
+    const viewed = viewedOverride[file.path] ?? file.viewed;
+    const findings = findingsByPath.get(file.path) ?? [];
+    return {
+      path: file.path,
+      oldPath: file.oldPath,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+      risk: file.risk,
+      viewed,
+      level: fileLevelByPath.get(file.path) ?? "files",
+      threadCount: (threadsByPath.get(file.path) ?? []).filter((thread) => !thread.isResolved).length,
+      draftCount: (draftsByPath.get(file.path) ?? []).length,
+      findingCount: findings.filter((finding) => (finding.status === "fail" || finding.status === "uncertain") && !finding.dismissed).length,
+    };
+  });
+
   if (!analysis) {
     return (
       <View style={{ flex: 1, padding: space.lg }}>
@@ -1426,7 +1541,12 @@ export function ModuleTab(props: ModuleTabProps) {
           <Pressable
             accessibilityRole="button"
             onPress={() =>
-              openChat(`Module: ${moduleInfo?.title ?? moduleId}\n\nFiles:\n${moduleFiles.map((file) => `- ${file.path}`).join("\n")}`)
+              openChat({
+                context: {
+                  label: `Module: ${moduleInfo?.title ?? moduleId} · ${moduleFiles.length} file${moduleFiles.length === 1 ? "" : "s"}`,
+                  text: `Module: ${moduleInfo?.title ?? moduleId}\n\nFiles:\n${moduleFiles.map((file) => `- ${file.path}`).join("\n")}`,
+                },
+              })
             }
             style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: space.sm, paddingVertical: space.xs }}
           >
@@ -1436,6 +1556,21 @@ export function ModuleTab(props: ModuleTabProps) {
         </View>
         {moduleInfo?.description ? <Text style={{ ...font.small, color: c.foregroundMuted }}>{moduleInfo.description}</Text> : null}
         {moduleInfo?.summary ? <Text style={{ ...font.small, color: c.foreground }}>{moduleInfo.summary}</Text> : null}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
+          <View style={{ flexDirection: "row", gap: 4 }}>
+            {DETAIL_LEVELS.map((level) => (
+              <Pressable
+                key={level}
+                accessibilityRole="button"
+                onPress={() => setModuleLevel(repo, number, moduleId, level, moduleFiles.map((file) => file.path))}
+                style={surfaces(c).pill(moduleLevelResult.level === level)}
+              >
+                <Text style={surfaces(c).pillText(moduleLevelResult.level === level)}>{DETAIL_LEVEL_LABELS[level]}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {levelCaption ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{levelCaption}</Text> : null}
+        </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexWrap: "wrap" }}>
           <Text style={{ ...font.caption, color: c.foregroundMuted }}>
             {viewedCount} of {moduleFiles.length} viewed · {effectiveLines} effective lines
@@ -1445,6 +1580,15 @@ export function ModuleTab(props: ModuleTabProps) {
               <Text style={surfaces(c).buttonQuietText}>
                 Mark {visibleUnviewedFiles.length} visible file{visibleUnviewedFiles.length === 1 ? "" : "s"} viewed
               </Text>
+            </Pressable>
+          ) : null}
+          {props.layout.compact ? (
+            <Pressable accessibilityRole="button" onPress={() => setFilesModalOpen(true)}>
+              <Text style={{ ...font.caption, color: c.accent }}>Files</Text>
+            </Pressable>
+          ) : !filePanelOpen ? (
+            <Pressable accessibilityRole="button" onPress={() => setFilePanelOpen(true)}>
+              <Text style={{ ...font.caption, color: c.accent }}>Show files</Text>
             </Pressable>
           ) : null}
           {props.layout.platform === "web" ? (
@@ -1461,6 +1605,17 @@ export function ModuleTab(props: ModuleTabProps) {
       </View>
 
       <View style={{ flex: 1, flexDirection: "row" }}>
+        {!props.layout.compact && filePanelOpen ? (
+          <View style={{ width: 240, borderRightWidth: 1, borderColor: c.border }}>
+            <FilePanel
+              theme={theme}
+              items={filePanelItems}
+              currentPath={currentPath}
+              onSelect={(path) => props.setFocusPath(path)}
+              onCollapse={() => setFilePanelOpen(false)}
+            />
+          </View>
+        ) : null}
         <FlatList
           ref={listRef}
           style={{ flex: 1 }}
@@ -1480,6 +1635,18 @@ export function ModuleTab(props: ModuleTabProps) {
           <Minimap theme={theme} segments={segments} isViewed={isFileViewed} scrollMetrics={scrollMetrics} onPressSegment={scrollToFile} />
         ) : null}
       </View>
+
+      <FilePanelModal
+        theme={theme}
+        items={filePanelItems}
+        currentPath={currentPath}
+        onSelect={(path) => {
+          props.setFocusPath(path);
+          setFilesModalOpen(false);
+        }}
+        open={filesModalOpen}
+        onOpenChange={setFilesModalOpen}
+      />
 
       <Modal title="Move to module" open={movingFile !== null} onOpenChange={(open) => !open && setMovingPath(null)}>
         <Modal.Content>

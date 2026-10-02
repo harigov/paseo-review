@@ -148,6 +148,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
 
     const service = createValidatorService();
@@ -179,6 +180,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
 
     const service = createValidatorService();
@@ -202,6 +204,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
 
     const service = createValidatorService();
@@ -241,6 +244,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
     const service = createValidatorService();
     const [result] = await service.evaluate({ validators: [validator], units, repo: "acme/widgets", number: 1 });
@@ -272,6 +276,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
     const service = createValidatorService();
     const [result] = await service.evaluate({ validators: [validator], units, repo: "acme/widgets", number: 1 });
@@ -303,6 +308,7 @@ describe("ValidatorService.evaluate", () => {
       triageThreads: async () => [],
       substantiveChange: async () => [],
       attention: async () => [],
+      reviewDepth: async () => [],
     };
 
     const service = createValidatorService();
@@ -377,7 +383,7 @@ describe("ValidatorService.save path traversal defense (D2/D16)", () => {
         decisionsEnabled: true,
       }),
       getViewer: async () => "me",
-      listInbox: async () => ({ viewer: "me", prs: [], fetchedAt: "", errors: [] }),
+      listInbox: async () => ({ viewer: "me", prs: [], fetchedAt: "", errors: [], refreshing: false }),
       getPr: async () => {
         throw new Error("not used");
       },

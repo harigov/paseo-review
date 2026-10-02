@@ -3,11 +3,12 @@ import { pollJob, startJob } from "../core/jobs";
 import { handle } from "../core/handle";
 import { services } from "../core/services";
 import type { AnalysisService, ValidationUnit } from "../core/services";
-import { FILE_LINES_MAX, fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
+import { depthRecomputeRpc, FILE_LINES_MAX, fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
 import type { Analysis, FileDiff, PrDetail, StructuralDiff } from "../../shared/types";
 import { annotateMovesAndWhitespace, countLines, parseUnifiedDiff, toFileDiff } from "./diff";
 import { ensureMirror, fetchPrRefs, fetchSha, grepAtRef, mergeBase as computeMergeBase, objectExists, rawDiff, showFile } from "./git";
 import { resolveRepo, resolvePrRefs } from "./core";
+import { recomputeDepth } from "./depth";
 import { runAnalysisPipeline } from "./pipeline";
 import { ANALYSIS_VERSION, loadAnalysis, saveAnalysis, saveOverride } from "./store";
 import { computeStructuralDiff, structuralKindFor } from "./structural";
@@ -248,6 +249,10 @@ export function createAnalysisService(): AnalysisService {
       if (!analysis) return;
       saveAnalysis(slug, number, { ...analysis, ...patch });
     },
+
+    async recomputeDepth(repo, number) {
+      await recomputeDepth(await canonicalSlug(repo), number);
+    },
   };
 }
 
@@ -258,6 +263,20 @@ export function registerAnalysisHandlers(server: PluginServerContext): void {
   });
 
   handle(server, jobPollRpc, async ({ jobId, waitMs }) => pollJob(jobId, waitMs ?? 0));
+
+  handle(server, depthRecomputeRpc, async ({ repo, number }) => {
+    const jobId = startJob(
+      "depth-recompute",
+      async (update) => {
+        update.stage("depth", 0.1);
+        await services.analysis.recomputeDepth(repo, number);
+        update.stage("done", 1);
+        return null;
+      },
+      `depth:${repo.toLowerCase()}#${number}`,
+    );
+    return { jobId };
+  });
 
   handle(server, prAnalysisRpc, async ({ repo, number }) => {
     const analysis = await services.analysis.getAnalysis(repo, number);

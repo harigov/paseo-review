@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { renderHtmlIframe } from "./html-web";
+import { renderHtmlIframe, buildMermaidRunBootstrapScript } from "./html-web";
+import { hasMermaidClass } from "./html-subset";
+import { useMermaidRuntime } from "./mermaid-runtime";
+import { isDarkSurface } from "../ui/color";
 
 /**
  * Renders a self-contained HTML document. On web/desktop this is a sandboxed iframe (CSP
@@ -20,9 +23,15 @@ export function HtmlView({
 }) {
   const c = theme.colors;
   const [copied, setCopied] = useState(false);
+  const hasMermaid = useMemo(() => hasMermaidClass(html), [html]);
+  const mermaidRuntime = useMermaidRuntime(Platform.OS === "web" && hasMermaid);
 
   if (Platform.OS === "web") {
-    return renderHtmlIframe(html, height);
+    const withMermaid =
+      hasMermaid && mermaidRuntime.status === "ready" && mermaidRuntime.script
+        ? `${html}<script>${mermaidRuntime.script}</script><script>${buildMermaidRunBootstrapScript(isDarkSurface(c.surface0))}</script>`
+        : html;
+    return renderHtmlIframe(withMermaid, height);
   }
 
   return (

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { ScrollView as RNScrollView, TextInputKeyPressEventData } from "react-native";
+import type { ScrollView as RNScrollView, TextInput as RNTextInput, TextInputKeyPressEventData } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useAgent, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
@@ -8,13 +8,25 @@ import { ChatStartResultSchema, chatStartRpc } from "../../shared/rpc";
 import { useJobRunner } from "../data/hooks";
 import { Markdown } from "../render/Markdown";
 import { Dot } from "../ui/chips";
+import { font, radius, space, surfaces } from "../ui/tokens";
+import { composeChatMessage } from "./chat-compose";
 import { applyTimelineEvent, toChatMessages, type ChatMessage } from "./chat-timeline";
+import type { ChatContext } from "../pr/tab-props";
 
 type Theme = PluginSurfaceProps["theme"];
 type Navigation = PluginSurfaceProps["navigation"];
 type ThemeColors = Theme["colors"];
 
 const TIMELINE_PAGE_LIMIT = 200;
+
+/** Starter prompts shown as pressable chips in the empty chat state. Pressing one only fills the
+ * composer — never sends (plan §4). The second set shows once a context chip is attached. */
+const STARTER_SUGGESTIONS = ["Orient me in this PR", "What's the riskiest change here?", "What should I test manually?"];
+const CONTEXT_STARTER_SUGGESTIONS = ["Summarize this", "What could break here?"];
+
+/** Context keys already attached in this app session. The compact layout's chat modal unmounts
+ * the panel on close, so a per-instance ref alone would re-attach an already-sent chip on reopen. */
+const appliedContextKeys = new Set<string>();
 
 function statusColor(status: string | null, c: ThemeColors): string {
   if (status === "running") return c.accent;
@@ -97,18 +109,21 @@ export function ChatPanel({
   prUrl,
   theme,
   navigation,
-  seed,
-  seedKey,
+  context,
+  contextKey,
 }: {
   repo: string;
   number: number;
   prUrl: string;
   theme: Theme;
   navigation: Navigation;
-  seed?: string;
-  seedKey?: string;
+  /** Attached to the composer as a removable chip; appended to the next message on Send. */
+  context?: ChatContext | null;
+  /** Changes whenever a new context is attached (re-attaches one the user removed). */
+  contextKey?: string;
 }) {
   const c = theme.colors;
+  const s = surfaces(c);
   const toast = useToast();
   const paseo = usePaseo();
   const chatStart = useRpc(chatStartRpc);
@@ -119,12 +134,13 @@ export function ChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [composerText, setComposerText] = useState("");
   const [sendBusy, setSendBusy] = useState(false);
+  const [chip, setChip] = useState<ChatContext | null>(null);
   const [, forceTick] = useReducer((n: number) => n + 1, 0);
 
   const mountedRef = useRef(true);
   const startedKeyRef = useRef<string | null>(null);
-  const sentSeedKeyRef = useRef<string | null>(null);
   const scrollRef = useRef<RNScrollView>(null);
+  const composerInputRef = useRef<RNTextInput | null>(null);
   // `useToast()`'s return identity isn't documented as stable across renders (it's host-
   // injected, not something this plugin controls). Read it through a ref inside the handle
   // effect below so an unstable `toast` object can't force that effect's subscriptions to
@@ -177,7 +193,6 @@ export function ChatPanel({
     startedKeyRef.current = key;
     setAgentId(null);
     setMessages([]);
-    sentSeedKeyRef.current = null;
     startChatNow();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, number]);
@@ -258,33 +273,36 @@ export function ChatPanel({
   const firstPendingPermission = pendingPermissions[0] ?? null;
   const hasPendingPermission = firstPendingPermission !== null || attentionReason === "permission";
 
-  // ---------- seed: send once per seedKey, only once the agent is ready and idle ----------
+  // ---------- context chip: attach, don't send (plan §4) ----------
 
   useEffect(() => {
-    if (!seed || !seedKey) return;
-    if (sentSeedKeyRef.current === seedKey) return;
-    if (!agentId || !handle) return;
-    if (status !== "idle") return;
-    sentSeedKeyRef.current = seedKey;
-    handle.send(seed).catch((error) => {
-      sentSeedKeyRef.current = null; // allow a retry (e.g. a later seedKey bump, or this one again)
-      if (mountedRef.current) toast.error(error instanceof Error ? error.message : "Could not send the seed message.");
-    });
-  }, [seed, seedKey, agentId, handle, status, toast]);
+    // A key is applied once: a re-render or remount with the same key must not re-attach a chip
+    // the user already removed or sent.
+    if (contextKey === undefined || appliedContextKeys.has(contextKey)) return;
+    appliedContextKeys.add(contextKey);
+    if (context) {
+      setChip(context);
+      composerInputRef.current?.focus();
+    }
+  }, [context, contextKey]);
 
   // ---------- composer ----------
 
   async function handleSend() {
     const text = composerText.trim();
     if (!text || !handle || running || sendBusy) return;
+    const attachedChip = chip;
+    const message = composeChatMessage(text, attachedChip);
     setSendBusy(true);
     setComposerText("");
+    setChip(null);
     try {
-      await handle.send(text);
+      await handle.send(message);
     } catch (error) {
       if (mountedRef.current) {
         toast.error(error instanceof Error ? error.message : "Could not send the message.");
         setComposerText(text);
+        setChip(attachedChip);
       }
     } finally {
       if (mountedRef.current) setSendBusy(false);
@@ -340,84 +358,121 @@ export function ChatPanel({
           )}
         </View>
       ) : (
-        <>
-          <ScrollView
-            ref={scrollRef}
-            style={{ flex: 1 }}
-            contentContainerStyle={{ padding: 12, gap: 10 }}
-            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-          >
-            {messages.length === 0 ? (
+        <ScrollView
+          ref={scrollRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 12, gap: 10 }}
+          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        >
+          {messages.length === 0 ? (
+            <View style={{ gap: space.sm }}>
               <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>Ask anything about this PR — the agent can read the diff and the repo.</Text>
-            ) : (
-              messages.map((message) => <MessageRow key={message.id} message={message} theme={theme} prUrl={prUrl} />)
-            )}
-            {running ? <Text style={{ color: c.foregroundMuted, fontSize: 11, fontStyle: "italic" }}>Thinking…</Text> : null}
-            {hasPendingPermission ? (
-              <View style={{ gap: 6, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 10 }}>
-                <Text style={{ color: c.statusWarning, fontSize: 12 }}>Waiting on a permission request</Text>
-                {firstPendingPermission?.title || firstPendingPermission?.description ? (
-                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                    {firstPendingPermission.title ?? firstPendingPermission.description}
-                  </Text>
-                ) : null}
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  <Pressable accessibilityRole="button" onPress={openInPaseo} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface2 }}>
-                    <Text style={{ color: c.foreground, fontSize: 11 }}>Open in Paseo</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
+                {(chip ? CONTEXT_STARTER_SUGGESTIONS : STARTER_SUGGESTIONS).map((suggestion) => (
+                  <Pressable key={suggestion} accessibilityRole="button" onPress={() => setComposerText(suggestion)} style={s.pill(false)}>
+                    <Text style={s.pillText(false)}>{suggestion}</Text>
                   </Pressable>
-                  {firstPendingPermission ? (
-                    <>
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => void respondToPermission("deny")}
-                        style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface2 }}
-                      >
-                        <Text style={{ color: c.statusDanger, fontSize: 11 }}>Deny</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => void respondToPermission("allow")}
-                        style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.accent }}
-                      >
-                        <Text style={{ color: c.accentForeground, fontSize: 11 }}>Allow</Text>
-                      </Pressable>
-                    </>
-                  ) : null}
-                </View>
+                ))}
               </View>
-            ) : null}
-          </ScrollView>
-
-          <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-end", padding: 10, borderTopWidth: 1, borderColor: c.border }}>
-            <TextInput
-              value={composerText}
-              onChangeText={setComposerText}
-              placeholder="Ask about this PR…"
-              multiline
-              editable={!sendBusy}
-              onKeyPress={(e) => {
-                // Best-effort Enter-to-send on web; Shift+Enter still inserts a newline.
-                // `shiftKey` isn't in TextInputKeyPressEventData's typed shape, but web delivers
-                // it at runtime, so it's read defensively rather than typed through.
-                const native = e.nativeEvent as TextInputKeyPressEventData & { shiftKey?: boolean };
-                if (native.key === "Enter" && !native.shiftKey) {
-                  e.preventDefault();
-                  if (!composerDisabled) void handleSend();
-                }
-              }}
-              style={{ flex: 1, minHeight: 36, maxHeight: 120, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8, fontSize: 13 }}
-            />
-            <Pressable
-              accessibilityRole="button"
-              disabled={composerDisabled}
-              onPress={() => void handleSend()}
-              style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: composerDisabled ? c.surface2 : c.accent }}
-            >
-              <Text style={{ color: composerDisabled ? c.foregroundMuted : c.accentForeground, fontSize: 12 }}>Send</Text>
-            </Pressable>
-          </View>
-        </>
+            </View>
+          ) : (
+            messages.map((message) => <MessageRow key={message.id} message={message} theme={theme} prUrl={prUrl} />)
+          )}
+          {running ? <Text style={{ color: c.foregroundMuted, fontSize: 11, fontStyle: "italic" }}>Thinking…</Text> : null}
+          {hasPendingPermission ? (
+            <View style={{ gap: 6, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 10 }}>
+              <Text style={{ color: c.statusWarning, fontSize: 12 }}>Waiting on a permission request</Text>
+              {firstPendingPermission?.title || firstPendingPermission?.description ? (
+                <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+                  {firstPendingPermission.title ?? firstPendingPermission.description}
+                </Text>
+              ) : null}
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable accessibilityRole="button" onPress={openInPaseo} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface2 }}>
+                  <Text style={{ color: c.foreground, fontSize: 11 }}>Open in Paseo</Text>
+                </Pressable>
+                {firstPendingPermission ? (
+                  <>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => void respondToPermission("deny")}
+                      style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.surface2 }}
+                    >
+                      <Text style={{ color: c.statusDanger, fontSize: 11 }}>Deny</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => void respondToPermission("allow")}
+                      style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: c.accent }}
+                    >
+                      <Text style={{ color: c.accentForeground, fontSize: 11 }}>Allow</Text>
+                    </Pressable>
+                  </>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
+        </ScrollView>
       )}
+
+      {/* Composer stays mounted (and typeable) even while the agent is still starting, so
+          attaching context and drafting a question doesn't have to wait on it (plan §4). Only
+          Send itself is gated on `agentId`, via `composerDisabled` below. */}
+      <View style={{ borderTopWidth: 1, borderColor: c.border }}>
+        {chip ? (
+          <View style={{ flexDirection: "row", paddingHorizontal: space.md, paddingTop: space.sm }}>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: space.xs,
+                backgroundColor: c.surface2,
+                borderRadius: radius.pill,
+                paddingHorizontal: space.sm,
+                paddingVertical: 4,
+                maxWidth: "100%",
+              }}
+            >
+              <Text style={{ ...font.caption, color: c.foreground }} numberOfLines={1}>
+                {chip.label}
+              </Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Remove attached context" onPress={() => setChip(null)}>
+                <Text style={{ ...font.caption, color: c.foregroundMuted }}>×</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-end", padding: 10 }}>
+          <TextInput
+            ref={composerInputRef}
+            value={composerText}
+            onChangeText={setComposerText}
+            placeholder="Ask about this PR…"
+            multiline
+            editable={!sendBusy}
+            onKeyPress={(e) => {
+              // Best-effort Enter-to-send on web; Shift+Enter still inserts a newline.
+              // `shiftKey` isn't in TextInputKeyPressEventData's typed shape, but web delivers
+              // it at runtime, so it's read defensively rather than typed through.
+              const native = e.nativeEvent as TextInputKeyPressEventData & { shiftKey?: boolean };
+              if (native.key === "Enter" && !native.shiftKey) {
+                e.preventDefault();
+                if (!composerDisabled) void handleSend();
+              }
+            }}
+            style={{ flex: 1, minHeight: 36, maxHeight: 120, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8, fontSize: 13 }}
+          />
+          <Pressable
+            accessibilityRole="button"
+            disabled={composerDisabled}
+            onPress={() => void handleSend()}
+            style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: composerDisabled ? c.surface2 : c.accent }}
+          >
+            <Text style={{ color: composerDisabled ? c.foregroundMuted : c.accentForeground, fontSize: 12 }}>Send</Text>
+          </Pressable>
+        </View>
+      </View>
     </View>
   );
 }

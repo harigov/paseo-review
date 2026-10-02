@@ -13,7 +13,9 @@ const mono = { fontFamily: "monospace", fontSize: 11 } as const;
  * needs); re-exported here so existing consumers of `OutlineView` keep working. */
 export { outlineSummary };
 
-function changeColor(change: OutlineChange, c: ThemeColors): string {
+/** Exported for `DiffRows.tsx`'s `decl` row (Declarations level), which uses the same change
+ * colour coding as this outline list. */
+export function changeColor(change: OutlineChange, c: ThemeColors): string {
   switch (change) {
     case "added":
       return c.statusSuccess;

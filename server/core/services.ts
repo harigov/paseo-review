@@ -1,5 +1,7 @@
+import type { DepthRule } from "../../shared/settings";
 import type {
   Analysis,
+  DetailLevel,
   FileDiff,
   PrDetail,
   PrSummary,
@@ -22,7 +24,9 @@ export interface GitHubService {
   listRepos(): Promise<{ repos: Repo[]; errors: string[] }>;
   findRepo(slug: string): Promise<Repo | null>;
   getViewer(): Promise<string>;
-  listInbox(refresh?: boolean): Promise<{ viewer: string; prs: PrSummary[]; fetchedAt: string; errors: string[] }>;
+  /** Stale-while-revalidate: returns the last snapshot at once (memory, else disk) and refreshes
+   * in the background when it is old (`refreshing: true`); `refresh: true` waits for fresh data. */
+  listInbox(refresh?: boolean): Promise<{ viewer: string; prs: PrSummary[]; fetchedAt: string; errors: string[]; refreshing: boolean }>;
   getPr(repo: string, number: number, refresh?: boolean): Promise<PrDetail>;
   setViewed(repo: string, number: number, path: string, viewed: boolean): Promise<ViewedState>;
 }
@@ -87,7 +91,14 @@ export interface AnalysisService {
     changedSinceMyReview: number | null;
   } | null>;
   /** Called by other areas to attach artifacts to the cached analysis (summary, visual HTML). */
-  patchAnalysis(repo: string, number: number, patch: Partial<Pick<Analysis, "summary" | "visualOverviewHtml" | "modules">>): Promise<void>;
+  patchAnalysis(
+    repo: string,
+    number: number,
+    patch: Partial<Pick<Analysis, "summary" | "visualOverviewHtml" | "modules" | "depthRulesHash">>,
+  ): Promise<void>;
+  /** Recomputes `modules[].recommendedLevel` / `levelReason` and `depthRulesHash` for the cached
+   * analysis from the current depth rules (no pipeline re-run); no-op when there's no analysis. */
+  recomputeDepth(repo: string, number: number): Promise<void>;
 }
 
 // ---------- server/decide (System One client + decision uses) ----------
@@ -130,6 +141,20 @@ export interface FileClassification {
   complexity: number | null;
 }
 
+/** One module, summarised for the review-depth rules (all lists already capped by the caller). */
+export interface ModuleDepthInput {
+  moduleId: string;
+  title: string;
+  description: string;
+  prTitle: string;
+  /** e.g. "files=12 additions=340 deletions=80 effective_lines=290 max_risk=3" */
+  stats: string;
+  /** "<status> <path> (+a -d)" per file. */
+  files: string[];
+  /** "<change> <kind> <name>" per changed declaration (from the outline). */
+  declarations: string[];
+}
+
 export interface DecisionService {
   /** Whether a provider + credentials are configured. */
   status(): Promise<{ configured: boolean; reason: string | null; provider: string; model: string }>;
@@ -147,6 +172,13 @@ export interface DecisionService {
   /** P(substantive) for "changed since you viewed" deltas. */
   substantiveChange(inputs: Array<{ path: string; delta: string }>): Promise<Array<number | null>>;
   attention(prs: PrSummary[]): Promise<Array<number | null>>;
+  /**
+   * Review depth per module from the user's depth rules: one noul question per active rule;
+   * a rule matches at P ≥ DEPTH_RULE_MATCH_THRESHOLD and `pickRuleLevel` combines matches
+   * (shared/levels.ts). Null per module when nothing matched, there are no rules, or the model
+   * is unavailable. Callers must check the repo's decision opt-in first.
+   */
+  reviewDepth(inputs: ModuleDepthInput[], rules: DepthRule[]): Promise<Array<{ level: DetailLevel; reason: string } | null>>;
 }
 
 // ---------- server/validators ----------

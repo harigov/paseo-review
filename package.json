@@ -19,6 +19,7 @@
   "dependencies": {
     "@getpaseo/highlight": "0.10.2",
     "marked": "^18.0.14",
+    "mermaid": "^11.17.2",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

@@ -1,6 +1,11 @@
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { z } from "zod";
 import { run } from "../core/exec";
 import { handle } from "../core/handle";
+import { dataDir } from "../core/paths";
 import { waitForPaseo } from "../core/paseo";
 import { getSettings } from "../core/settings";
 import { services, type GitHubService } from "../core/services";
@@ -12,19 +17,22 @@ import {
   reviewSubmitRpc,
   threadReplyRpc,
 } from "../../shared/rpc";
-import type {
-  InboxSection,
-  PrDetail,
-  PrFile,
-  PrReview,
-  PrSummary,
-  Repo,
-  ReviewRequest,
-  ReviewState,
-  Thread,
-  ViewedState,
+import {
+  PrSummarySchema,
+  type InboxSection,
+  type PrDetail,
+  type PrFile,
+  type PrReview,
+  type PrSummary,
+  type Repo,
+  type ReviewRequest,
+  type ReviewState,
+  type Thread,
+  type ViewedState,
 } from "../../shared/types";
 import { errorMessage, gqlString, graphql, graphqlWithVars, parseGithubSlug, splitRepo } from "./gh";
+import { inlineRepoImages } from "./body-images";
+import { createInboxCache, type InboxCacheValue } from "./inbox-cache";
 import { recordViewed, removeViewed } from "./viewed-store";
 
 type ChecksState = "success" | "failure" | "pending" | "none";
@@ -341,15 +349,51 @@ const INBOX_QUERY = `
   ${PR_SEARCH_FRAGMENT}
 `;
 
-interface InboxCacheValue {
-  viewer: string;
-  prs: PrSummary[];
-  fetchedAt: string;
-  errors: string[];
+/** Snapshot age past which `listInbox` serves the cached inbox but starts a background refresh
+ * (docs/plan-round4.md §1), rather than the old 30 s blocking-cache TTL. */
+const INBOX_STALE_MS = 60_000;
+
+function inboxCacheFile(): string {
+  return path.join(dataDir(), "inbox-cache.json");
 }
 
-let inboxCache: { at: number; value: InboxCacheValue } | null = null;
-const INBOX_TTL_MS = 30_000;
+const InboxCacheFileSchema = z.object({
+  viewer: z.string(),
+  prs: z.array(PrSummarySchema),
+  fetchedAt: z.string(),
+  errors: z.array(z.string()),
+});
+
+/** Loads the persisted inbox snapshot (if any) written by a previous daemon run, so the first
+ * open after a restart can be instant too. A missing file, unreadable file, invalid JSON, or a
+ * JSON value that fails the schema are all treated as "nothing to load" rather than throwing. */
+async function loadInboxCacheFromDisk(): Promise<InboxCacheValue | null> {
+  try {
+    const raw = await readFile(inboxCacheFile(), "utf8");
+    const parsed = InboxCacheFileSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Writes the inbox snapshot atomically: write to a temp file in the same directory, then rename
+ * over the target (like `server/ui-state/index.ts`), so a crash or concurrent read never observes
+ * a half-written file. */
+async function saveInboxCacheToDisk(value: InboxCacheValue): Promise<void> {
+  const target = inboxCacheFile();
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  await writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
+  await rename(tmp, target);
+}
+
+const inboxCache = createInboxCache({
+  fetch: fetchInbox,
+  load: loadInboxCacheFromDisk,
+  save: saveInboxCacheToDisk,
+  now: () => Date.now(),
+  staleMs: INBOX_STALE_MS,
+});
 
 /** Decision-model "needs my attention" score, cached per PR#head so a background fill from one
  * refresh is visible on the next, without ever blocking (or failing) the inbox response. */
@@ -402,9 +446,27 @@ async function fillInboxEnrichment(prs: PrSummary[], repos: Repo[]): Promise<voi
   if (eligible.length) await fillAttention(eligible);
 }
 
-async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
-  if (!refresh && inboxCache && Date.now() - inboxCache.at < INBOX_TTL_MS) return inboxCache.value;
+/** Stale-while-revalidate entry point (docs/plan-round4.md §1): serves the last snapshot (memory,
+ * else loaded once from disk) immediately, refreshing in the background once it's stale, so the
+ * surface never blocks on a cold GraphQL search unless there is truly nothing cached yet. The SWR
+ * mechanics live in `./inbox-cache` so they're unit-testable; this just wires in the real fetch
+ * and atomic disk persistence. */
+async function listInbox(refresh?: boolean): Promise<InboxCacheValue & { refreshing: boolean }> {
+  try {
+    const { value, refreshing } = await inboxCache.get(refresh);
+    return { ...value, refreshing };
+  } catch (error) {
+    // Nothing cached to fall back on: answer with an empty inbox carrying the real error (e.g.
+    // `gh` not authenticated) for the banner, rather than failing the RPC with a generic error.
+    // Not cached, so the next call tries again.
+    return { viewer: "", prs: [], fetchedAt: new Date().toISOString(), errors: [`Could not load the GitHub inbox: ${errorMessage(error)}`], refreshing: false };
+  }
+}
 
+/** One true fetch of the inbox from GitHub: search + enrichment. Rejects on a GraphQL failure
+ * (the `inboxCache` SWR core decides whether that's fatal or just a logged, surfaced error on top
+ * of the last good snapshot) rather than swallowing it here. */
+async function fetchInbox(): Promise<InboxCacheValue> {
   const errors: string[] = [];
   const { repos, errors: repoErrors } = await listRepos();
   errors.push(...repoErrors);
@@ -417,9 +479,7 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
   }
 
   if (!repos.length || !viewer) {
-    const value: InboxCacheValue = { viewer, prs: [], fetchedAt: new Date().toISOString(), errors };
-    inboxCache = { at: Date.now(), value };
-    return value;
+    return { viewer, prs: [], fetchedAt: new Date().toISOString(), errors };
   }
 
   const repoFilter = repos.map((r) => `repo:${r.slug}`).join(" ");
@@ -432,56 +492,44 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
     all: `is:pr is:open ${repoFilter} sort:updated-desc`,
   };
 
-  const merged = new Map<string, PrSummary>();
-  try {
-    const data = await graphqlWithVars<{
-      recent: { nodes: SearchPrNode[] };
-      mine: { nodes: SearchPrNode[] };
-      reviewRequested: { nodes: SearchPrNode[] };
-      assigned: { nodes: SearchPrNode[] };
-      all: { nodes: SearchPrNode[] };
-    }>(INBOX_QUERY, {
-      qMine: sections.mine,
-      qReview: sections.review_requested,
-      qAssigned: sections.assigned,
-      qAll: sections.all,
-      qRecent: sections.recent,
-    });
+  const data = await graphqlWithVars<{
+    recent: { nodes: SearchPrNode[] };
+    mine: { nodes: SearchPrNode[] };
+    reviewRequested: { nodes: SearchPrNode[] };
+    assigned: { nodes: SearchPrNode[] };
+    all: { nodes: SearchPrNode[] };
+  }>(INBOX_QUERY, {
+    qMine: sections.mine,
+    qReview: sections.review_requested,
+    qAssigned: sections.assigned,
+    qAll: sections.all,
+    qRecent: sections.recent,
+  });
 
-    const bySection: Array<[InboxSection, SearchPrNode[]]> = [
-      ["recent", data.recent?.nodes ?? []],
-      ["mine", data.mine?.nodes ?? []],
-      ["review_requested", data.reviewRequested?.nodes ?? []],
-      ["assigned", data.assigned?.nodes ?? []],
-      ["all", data.all?.nodes ?? []],
-    ];
-    for (const [section, nodes] of bySection) {
-      for (const node of nodes) {
-        const key = `${node.repository.nameWithOwner}#${node.number}`;
-        let summary = merged.get(key);
-        if (!summary) {
-          summary = buildSummaryFromSearchNode(node);
-          merged.set(key, summary);
-        }
-        if (!summary.sections.includes(section)) summary.sections.push(section);
+  const merged = new Map<string, PrSummary>();
+  const bySection: Array<[InboxSection, SearchPrNode[]]> = [
+    ["recent", data.recent?.nodes ?? []],
+    ["mine", data.mine?.nodes ?? []],
+    ["review_requested", data.reviewRequested?.nodes ?? []],
+    ["assigned", data.assigned?.nodes ?? []],
+    ["all", data.all?.nodes ?? []],
+  ];
+  for (const [section, nodes] of bySection) {
+    for (const node of nodes) {
+      const key = `${node.repository.nameWithOwner}#${node.number}`;
+      let summary = merged.get(key);
+      if (!summary) {
+        summary = buildSummaryFromSearchNode(node);
+        merged.set(key, summary);
       }
+      if (!summary.sections.includes(section)) summary.sections.push(section);
     }
-  } catch (error) {
-    errors.push(`Could not load the GitHub inbox: ${errorMessage(error)}`);
-    if (inboxCache) return inboxCache.value;
   }
 
   const prs = [...merged.values()];
   await fillInboxEnrichment(prs, repos);
 
-  const value: InboxCacheValue = {
-    viewer,
-    prs,
-    fetchedAt: new Date().toISOString(),
-    errors,
-  };
-  inboxCache = { at: Date.now(), value };
-  return value;
+  return { viewer, prs, fetchedAt: new Date().toISOString(), errors };
 }
 
 // ---------- PR detail ----------
@@ -803,7 +851,9 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   return {
     summary,
     body: basePr.body ?? "",
-    bodyHtml: basePr.bodyHTML ?? "",
+    // Repo-relative images (github.com/<o>/<r>/blob|raw/...) need a GitHub session the sandboxed
+    // description iframe doesn't have; inline them as data: URIs (see body-images.ts).
+    bodyHtml: await inlineRepoImages(basePr.bodyHTML ?? "", repo),
     nodeId: basePr.id,
     baseSha: basePr.baseRefOid,
     commits: basePr.commits?.totalCount ?? 0,

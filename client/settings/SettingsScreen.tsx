@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { Pressable, Switch, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useRpc, useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
-import { ScrollView } from "@getpaseo/plugin/client/react-native";
+import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import {
   ExternalLink,
   SettingsAction,
@@ -12,7 +13,9 @@ import {
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { agentChoicesRpc, precomputeStatusRpc, reposListRpc } from "../../shared/rpc";
-import { prReviewSettings, PrReviewSettingsSchema, type PrReviewSettings } from "../../shared/settings";
+import { prReviewSettings, PrReviewSettingsSchema, type DepthRule, type PrReviewSettings } from "../../shared/settings";
+import { DETAIL_LEVELS, DETAIL_LEVEL_LABELS } from "../../shared/levels";
+import { font, space, surfaces } from "../ui/tokens";
 
 const PROVIDER_OPTIONS = [
   { label: "OpenRouter (System One · Jev)", value: "openrouter" as const },
@@ -35,6 +38,16 @@ const DIFF_LAYOUT_OPTIONS = [
 const DIFF_DENSITY_OPTIONS = [
   { label: "Comfortable", value: "comfortable" as const },
   { label: "Compact", value: "compact" as const },
+];
+
+const DEPTH_LEVEL_OPTIONS = DETAIL_LEVELS.map((level) => ({ label: DETAIL_LEVEL_LABELS[level], value: level }));
+
+/** Inserted by "Add starter rules" (only offered while the list is empty). */
+const STARTER_DEPTH_RULES: DepthRule[] = [
+  { when: "Touches authentication, authorization, payments, secrets, or data migrations", level: "code", enabled: true },
+  { when: "Changes concurrency, caching, retries, or error handling in core logic", level: "code", enabled: true },
+  { when: "Only adds or reshapes types, interfaces, or API signatures", level: "declarations", enabled: true },
+  { when: "Only tests, fixtures, snapshots, generated code, or documentation", level: "files", enabled: true },
 ];
 
 const AGENT_TASKS: { key: keyof PrReviewSettings["agents"]; label: string }[] = [
@@ -68,6 +81,12 @@ function useSettingsCommitter(settings: SettingsState<typeof PrReviewSettingsSch
   const chainRef = useRef<Promise<void>>(Promise.resolve());
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [errors, setErrors] = useState<Record<string, string | null>>({});
+  // `stateRef` is mutated directly (see `schedule`) so two edits never fight over a stale
+  // closure, but a ref write alone doesn't re-render. Most fields don't care (SettingsInput is
+  // uncontrolled, so it keeps its own buffer regardless) — but the review-depth rule rows are
+  // controlled, so the row showing rule N must repaint with rule N's current text right after a
+  // reorder. This tick forces that repaint after every `schedule()` call.
+  const [, bump] = useReducer((n: number) => n + 1, 0);
 
   if (settings.status === "ready" && !pendingRef.current) {
     stateRef.current = { values: settings.values, revision: settings.revision };
@@ -111,6 +130,7 @@ function useSettingsCommitter(settings: SettingsState<typeof PrReviewSettingsSch
     pendingRef.current = true;
     stateRef.current = { ...stateRef.current, values: mutate(stateRef.current.values) };
     setErrors((prev) => (prev[key] ? { ...prev, [key]: null } : prev));
+    bump();
     clearTimeout(timersRef.current[key]);
     timersRef.current[key] = setTimeout(() => enqueue(key), debounceMs);
   }
@@ -172,7 +192,119 @@ function NumberSettingsInput({
   );
 }
 
-export function SettingsScreen(_props: PluginSurfaceProps): ReactNode {
+/**
+ * Ordered list of review-depth rules. Each row is fully controlled (not the usual `SettingsInput`
+ * uncontrolled pattern) because reordering swaps content across rows by index — an uncontrolled
+ * input would keep showing its own stale text after a move. `useSettingsCommitter`'s `bump()`
+ * (see above) repaints this list right after every edit, so the controlled values never lag.
+ */
+function ReviewDepthRules({
+  theme,
+  rules,
+  onChangeWhen,
+  onChangeLevel,
+  onToggleEnabled,
+  onMove,
+  onDelete,
+  onAdd,
+  onAddStarters,
+}: {
+  theme: PluginSurfaceProps["theme"];
+  rules: DepthRule[];
+  onChangeWhen(index: number, when: string): void;
+  onChangeLevel(index: number, level: DepthRule["level"]): void;
+  onToggleEnabled(index: number, enabled: boolean): void;
+  onMove(index: number, direction: -1 | 1): void;
+  onDelete(index: number): void;
+  onAdd(): void;
+  onAddStarters(): void;
+}) {
+  const c = theme.colors;
+  const s = surfaces(c);
+
+  if (rules.length === 0) {
+    return (
+      <View style={{ gap: space.sm }}>
+        <Text style={{ ...font.small, color: c.foregroundMuted }}>
+          No rules yet — PR Review uses its built-in default for every module.
+        </Text>
+        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+          <Pressable accessibilityRole="button" onPress={onAdd} style={s.buttonQuiet}>
+            <Text style={s.buttonQuietText}>Add rule</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={onAddStarters} style={s.button}>
+            <Text style={s.buttonText}>Add starter rules</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ gap: space.sm }}>
+      <View style={s.card}>
+        {rules.map((rule, index) => (
+          <View key={index}>
+            {index > 0 && <View style={{ ...s.hairline, marginVertical: space.sm }} />}
+            <View style={{ gap: space.xs }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+                <Text style={{ ...font.caption, color: c.foregroundMuted, flex: 1 }}>Rule {index + 1}</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Move rule up"
+                  disabled={index === 0}
+                  onPress={() => onMove(index, -1)}
+                  style={{ opacity: index === 0 ? 0.35 : 1, padding: 4 }}
+                >
+                  <Icon name="ArrowUp" size={14} color={c.foregroundMuted} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Move rule down"
+                  disabled={index === rules.length - 1}
+                  onPress={() => onMove(index, 1)}
+                  style={{ opacity: index === rules.length - 1 ? 0.35 : 1, padding: 4 }}
+                >
+                  <Icon name="ArrowDown" size={14} color={c.foregroundMuted} />
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel="Delete rule" onPress={() => onDelete(index)} style={{ padding: 4 }}>
+                  <Icon name="Trash2" size={14} color={c.statusDanger} />
+                </Pressable>
+              </View>
+              <TextInput
+                value={rule.when}
+                onChangeText={(when) => onChangeWhen(index, when)}
+                multiline
+                placeholder="e.g. Touches authentication, authorization, payments, secrets, or data migrations"
+                style={{ ...s.input, minHeight: 60 }}
+              />
+              <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
+                <View style={{ flex: 1 }}>
+                  <SettingsSelect
+                    label="Opens at"
+                    value={rule.level}
+                    options={DEPTH_LEVEL_OPTIONS}
+                    onValueChange={(level) => onChangeLevel(index, level)}
+                  />
+                </View>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
+                  <Text style={{ ...font.small, color: c.foregroundMuted }}>Enabled</Text>
+                  <Switch value={rule.enabled} onValueChange={(enabled) => onToggleEnabled(index, enabled)} />
+                </View>
+              </View>
+            </View>
+          </View>
+        ))}
+      </View>
+      <Pressable accessibilityRole="button" onPress={onAdd} style={{ ...s.buttonQuiet, alignSelf: "flex-start" }}>
+        <Text style={s.buttonQuietText}>Add rule</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+export function SettingsScreen(props: PluginSurfaceProps): ReactNode {
+  const { theme } = props;
   const settings = useSettings(prReviewSettings);
   const reposRpc = useRpc(reposListRpc);
   const agentChoicesRpcFn = useRpc(agentChoicesRpc);
@@ -290,6 +422,65 @@ export function SettingsScreen(_props: PluginSurfaceProps): ReactNode {
               }
             />
           ))}
+        </SettingsGroup>
+
+        <SettingsGroup
+          title="Review depth"
+          info={
+            "Each rule is a plain-language condition the decision model checks against every module. Matching " +
+            "modules open at that depth; when several match, the deepest one wins. With no rules — or for repos " +
+            "not opted in to the decision model above — PR Review falls back to its built-in default: noise " +
+            "modules open at Files, high-risk modules at Code, large modules with declaration outlines at " +
+            "Declarations, and everything else at Code."
+          }
+        >
+          <ReviewDepthRules
+            theme={theme}
+            rules={values.reviewDepth.rules}
+            onChangeWhen={(index, when) =>
+              committer.schedule(
+                `reviewDepth.rules.${index}.when`,
+                (v) => ({ ...v, reviewDepth: { rules: v.reviewDepth.rules.map((r, i) => (i === index ? { ...r, when } : r)) } }),
+                SAVE_DEBOUNCE_MS,
+              )
+            }
+            onChangeLevel={(index, level) =>
+              committer.commit("reviewDepth.rules", (v) => ({
+                ...v,
+                reviewDepth: { rules: v.reviewDepth.rules.map((r, i) => (i === index ? { ...r, level } : r)) },
+              }))
+            }
+            onToggleEnabled={(index, enabled) =>
+              committer.commit("reviewDepth.rules", (v) => ({
+                ...v,
+                reviewDepth: { rules: v.reviewDepth.rules.map((r, i) => (i === index ? { ...r, enabled } : r)) },
+              }))
+            }
+            onMove={(index, direction) =>
+              committer.commit("reviewDepth.rules", (v) => {
+                const rules = [...v.reviewDepth.rules];
+                const target = index + direction;
+                if (target < 0 || target >= rules.length) return v;
+                [rules[index], rules[target]] = [rules[target], rules[index]];
+                return { ...v, reviewDepth: { rules } };
+              })
+            }
+            onDelete={(index) =>
+              committer.commit("reviewDepth.rules", (v) => ({
+                ...v,
+                reviewDepth: { rules: v.reviewDepth.rules.filter((_, i) => i !== index) },
+              }))
+            }
+            onAdd={() =>
+              committer.commit("reviewDepth.rules", (v) => ({
+                ...v,
+                reviewDepth: { rules: [...v.reviewDepth.rules, { when: "", level: "code" as const, enabled: true }] },
+              }))
+            }
+            onAddStarters={() =>
+              committer.commit("reviewDepth.rules", (v) => ({ ...v, reviewDepth: { rules: STARTER_DEPTH_RULES } }))
+            }
+          />
         </SettingsGroup>
 
         <SettingsGroup title="Agent defaults" info="Which agent profile or model each task uses by default.">

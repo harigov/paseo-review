@@ -53,7 +53,7 @@ describe("precompute status (AG5 / AG10): lastError is not clobbered", () => {
       listRepos: async () => ({ repos: [], errors: [] }),
       findRepo: async () => null,
       getViewer: async () => "octocat",
-      listInbox: async () => ({ viewer: "octocat", prs: [prSummary()], fetchedAt: new Date().toISOString(), errors: [] }),
+      listInbox: async () => ({ viewer: "octocat", prs: [prSummary()], fetchedAt: new Date().toISOString(), errors: [], refreshing: false }),
       getPr: async () => {
         throw new Error("not used in this suite");
       },
@@ -79,6 +79,7 @@ describe("precompute status (AG5 / AG10): lastError is not clobbered", () => {
       moveFile: async () => undefined,
       getInboxEnrichment: async () => null,
       patchAnalysis: async () => undefined,
+      recomputeDepth: async () => {},
     };
   });
 
@@ -96,7 +97,7 @@ describe("precompute status (AG5 / AG10): lastError is not clobbered", () => {
 
     services.analysis.startAnalysis = () => "job_ok";
     // No PRs this time, so the loop body (and its failure) never runs.
-    services.github.listInbox = async () => ({ viewer: "octocat", prs: [], fetchedAt: new Date().toISOString(), errors: [] });
+    services.github.listInbox = async () => ({ viewer: "octocat", prs: [], fetchedAt: new Date().toISOString(), errors: [], refreshing: false });
 
     await runOnce();
     expect(getPrecomputeStatus().lastError).toBeNull();
@@ -139,6 +140,7 @@ describe("collectGuidanceFiles ancestor walk (AG9)", () => {
       moveFile: async () => undefined,
       getInboxEnrichment: async () => null,
       patchAnalysis: async () => undefined,
+      recomputeDepth: async () => {},
     };
   });
 

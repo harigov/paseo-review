@@ -8,28 +8,30 @@ function thread(partial: Partial<Thread> & { id: string; path: string }): Thread
   return { line: null, originalLine: null, diffSide: "RIGHT", isResolved: false, isOutdated: false, comments: [], triage: null, triageProbability: null, ...partial };
 }
 
-// A hand-built stream: two expanded files (a.ts with two hunks, an open thread and a failing
-// finding; c.ts with one hunk) around a collapsed file (b.ts).
+// A hand-built stream: two open files (a.ts, at Code level, with two hunks, an open thread and a
+// failing finding; c.ts with one hunk) around a collapsed (Files-level) file (b.ts). `rail`
+// values are arbitrary here — keyboard.ts never reads them.
 const rows: Row[] = [
-  { type: "fileHeader", key: "fh:a", path: "a.ts", file: {} as never, expanded: true, viewed: "UNVIEWED", outlineSummary: "" }, // 0
-  { type: "fileMeta", key: "fm:a", path: "a.ts", file: {} as never, viewed: "UNVIEWED", sinceViewedHighlighted: false }, // 1
-  { type: "hunkHeader", key: "hh:a:0", path: "a.ts", hunkIndex: 0, context: "", newStart: 1, newEnd: 2 }, // 2
-  { type: "line", key: "l:a:0:0", path: "a.ts", hunkIndex: 0, lineIndex: 0 }, // 3
-  { type: "line", key: "l:a:0:1", path: "a.ts", hunkIndex: 0, lineIndex: 1 }, // 4
-  { type: "thread", key: "t:1", path: "a.ts", thread: thread({ id: "t1", path: "a.ts", isResolved: false }) }, // 5
-  { type: "line", key: "l:a:0:2", path: "a.ts", hunkIndex: 0, lineIndex: 2 }, // 6
-  { type: "hunkHeader", key: "hh:a:1", path: "a.ts", hunkIndex: 1, context: "", newStart: 10, newEnd: 11 }, // 7
-  { type: "line", key: "l:a:1:0", path: "a.ts", hunkIndex: 1, lineIndex: 0 }, // 8
+  { type: "fileHeader", key: "fh:a", path: "a.ts", file: {} as never, level: "code", viewed: "UNVIEWED", outlineSummary: "", rail: 0 }, // 0
+  { type: "fileMeta", key: "fm:a", path: "a.ts", file: {} as never, viewed: "UNVIEWED", sinceViewedHighlighted: false, level: "code", rail: 0 }, // 1
+  { type: "hunkHeader", key: "hh:a:0", path: "a.ts", hunkIndex: 0, context: "", newStart: 1, newEnd: 2, rail: 0 }, // 2
+  { type: "line", key: "l:a:0:0", path: "a.ts", hunkIndex: 0, lineIndex: 0, rail: 0 }, // 3
+  { type: "line", key: "l:a:0:1", path: "a.ts", hunkIndex: 0, lineIndex: 1, rail: 0 }, // 4
+  { type: "thread", key: "t:1", path: "a.ts", thread: thread({ id: "t1", path: "a.ts", isResolved: false }), rail: 0 }, // 5
+  { type: "line", key: "l:a:0:2", path: "a.ts", hunkIndex: 0, lineIndex: 2, rail: 0 }, // 6
+  { type: "hunkHeader", key: "hh:a:1", path: "a.ts", hunkIndex: 1, context: "", newStart: 10, newEnd: 11, rail: 0 }, // 7
+  { type: "line", key: "l:a:1:0", path: "a.ts", hunkIndex: 1, lineIndex: 0, rail: 0 }, // 8
   {
     type: "finding",
     key: "f:1",
     path: "a.ts",
     finding: { unitKey: "u1", path: "a.ts", startLine: 10, endLine: 10, probability: 0.9, status: "fail", dismissed: false, excerpt: "", validatorId: "v1", validatorTitle: "V" },
+    rail: 0,
   }, // 9
-  { type: "fileHeader", key: "fh:b", path: "b.ts", file: {} as never, expanded: false, viewed: "VIEWED", outlineSummary: "" }, // 10
-  { type: "fileHeader", key: "fh:c", path: "c.ts", file: {} as never, expanded: true, viewed: "UNVIEWED", outlineSummary: "" }, // 11
-  { type: "hunkHeader", key: "hh:c:0", path: "c.ts", hunkIndex: 0, context: "", newStart: 1, newEnd: 1 }, // 12
-  { type: "line", key: "l:c:0:0", path: "c.ts", hunkIndex: 0, lineIndex: 0 }, // 13
+  { type: "fileHeader", key: "fh:b", path: "b.ts", file: {} as never, level: "files", viewed: "VIEWED", outlineSummary: "", rail: 1 }, // 10
+  { type: "fileHeader", key: "fh:c", path: "c.ts", file: {} as never, level: "code", viewed: "UNVIEWED", outlineSummary: "", rail: 0 }, // 11
+  { type: "hunkHeader", key: "hh:c:0", path: "c.ts", hunkIndex: 0, context: "", newStart: 1, newEnd: 1, rail: 0 }, // 12
+  { type: "line", key: "l:c:0:0", path: "c.ts", hunkIndex: 0, lineIndex: 0, rail: 0 }, // 13
 ];
 
 describe("nextFileIndex", () => {
@@ -87,12 +89,13 @@ describe("nextUnresolvedIndex", () => {
 
   it("returns null when there is no unresolved row anywhere", () => {
     const resolvedRows: Row[] = [
-      { type: "thread", key: "t:1", path: "a.ts", thread: thread({ id: "t1", path: "a.ts", isResolved: true }) },
+      { type: "thread", key: "t:1", path: "a.ts", thread: thread({ id: "t1", path: "a.ts", isResolved: true }), rail: 0 },
       {
         type: "finding",
         key: "f:1",
         path: "a.ts",
         finding: { unitKey: "u1", path: "a.ts", startLine: 1, endLine: 1, probability: 0.9, status: "fail", dismissed: true, excerpt: "", validatorId: "v1", validatorTitle: "V" },
+        rail: 0,
       },
     ];
     expect(nextUnresolvedIndex(resolvedRows, null)).toBeNull();

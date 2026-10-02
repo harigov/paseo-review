@@ -1,10 +1,13 @@
 import { marked, type Token, type Tokens } from "marked";
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Image, Linking, Pressable, Text, View, type TextStyle } from "react-native";
+import { Image, Linking, Platform, Pressable, Text, View, type TextStyle } from "react-native";
 import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
+import { openExternalUrl } from "@getpaseo/plugin/client";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { decodeEntities, parseHtmlFragment, type HtmlNode } from "./html-subset";
+import { decodeEntities, findVideoSrc, parseHtmlFragment, svgDataUri, svgDimensions, type HtmlNode } from "./html-subset";
 import { detectAlert, linkifyGithubRefs, stripHtmlComments, type AlertKind } from "./markdown-text";
+import { MermaidView } from "./MermaidView";
+import { renderVideoElement } from "./html-web";
 
 // Ported from the MIT Ironside Software pull-requests-paseo-plugin (client/markdown.tsx),
 // then substantially rewritten to additionally render GitHub's sanitised HTML subset (the kind
@@ -52,7 +55,7 @@ const ALERT_META: Record<AlertKind, { icon: string; label: string; color: (c: Co
 const VOID_INLINE_TAGS = new Set(["br", "hr", "img", "input", "source", "meta", "link", "col", "wbr"]);
 const BLOCK_HTML_TAGS = new Set([
   "div", "p", "section", "center", "ul", "ol", "li", "blockquote", "pre", "table",
-  "details", "summary", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+  "details", "summary", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "video", "svg",
 ]);
 
 /** Inline style contributed by a formatting tag; `code`/`kbd` also get a background. */
@@ -676,6 +679,31 @@ export function Markdown({ body, theme, baseUrl }: { body: string; theme: Theme;
           </ScrollView>
         );
       }
+      case "video": {
+        const src = findVideoSrc(node);
+        if (!src) return null;
+        if (Platform.OS === "web") return renderVideoElement({ src });
+        if (!/^https:\/\//i.test(src.trim())) return null;
+        return (
+          <Pressable key={key} accessibilityRole="button" onPress={() => void openExternalUrl(src).catch(() => toast.error("Could not open video."))}>
+            <Text style={{ color: c.accent, fontSize: 14 }}>▶ Open video</Text>
+          </Pressable>
+        );
+      }
+      case "svg": {
+        if (!node.raw) return null;
+        if (Platform.OS !== "web") {
+          return (
+            <View key={key} style={{ height: 80, alignItems: "center", justifyContent: "center", backgroundColor: c.surface1, borderRadius: 6 }}>
+              <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>SVG image</Text>
+            </View>
+          );
+        }
+        const dims = svgDimensions(attrs);
+        const height = Math.min(dims?.height ?? 200, 480);
+        const width = dims ? Math.round((dims.width / dims.height) * height) : 320;
+        return <Image key={key} source={{ uri: svgDataUri(node.raw) }} resizeMode="contain" style={{ width, height }} />;
+      }
       case "ul":
       case "ol": {
         const items = children.filter((n): n is HtmlElement => isElement(n) && n.tag === "li");
@@ -888,6 +916,10 @@ export function Markdown({ body, theme, baseUrl }: { body: string; theme: Theme;
       }
       case "code": {
         const codeToken = token as Tokens.Code;
+        const lang = (codeToken.lang ?? "").trim().toLowerCase();
+        if (lang === "mermaid" || lang.startsWith("mermaid ")) {
+          return <MermaidView key={key} source={codeToken.text} theme={theme} />;
+        }
         return (
           <View key={key} style={{ backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border, borderRadius: 6 }}>
             {codeToken.lang ? (

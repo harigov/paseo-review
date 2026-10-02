@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { decodeEntities, parseHtmlFragment } from "../client/render/html-subset";
+import {
+  decodeEntities,
+  findMermaidSources,
+  findVideoSrc,
+  hasMermaidClass,
+  parseHtmlFragment,
+  svgDataUri,
+  svgDimensions,
+  type HtmlElement,
+} from "../client/render/html-subset";
 
 describe("parseHtmlFragment", () => {
   it("parses nested elements with text content", () => {
@@ -158,5 +167,155 @@ describe("decodeEntities", () => {
 
   it("is a no-op when there is no ampersand", () => {
     expect(decodeEntities("nothing to decode")).toBe("nothing to decode");
+  });
+});
+
+describe("parseHtmlFragment: <svg> raw outer HTML", () => {
+  it("captures the exact source span for a closed <svg>, and nothing for other tags", () => {
+    const html = '<p>before</p><svg viewBox="0 0 10 10"><path d="M0 0"/></svg><p>after</p>';
+    const tree = parseHtmlFragment(html);
+    const svg = tree[1] as HtmlElement;
+    expect(svg.tag).toBe("svg");
+    expect(svg.raw).toBe('<svg viewBox="0 0 10 10"><path d="M0 0"/></svg>');
+    expect((tree[0] as HtmlElement).raw).toBeUndefined();
+  });
+
+  it("captures a self-closing <svg/> as just itself", () => {
+    const tree = parseHtmlFragment('x<svg width="1" height="1"/>y');
+    const svg = tree[1] as HtmlElement;
+    expect(svg.tag).toBe("svg");
+    expect(svg.raw).toBe('<svg width="1" height="1"/>');
+  });
+
+  it("captures only the inner span for a nested <svg> (e.g. a <symbol> defining one)", () => {
+    const html = '<svg id="outer"><defs><svg id="inner"><rect/></svg></defs></svg>';
+    const tree = parseHtmlFragment(html);
+    const outer = tree[0] as HtmlElement;
+    expect(outer.attrs.id).toBe("outer");
+    expect(outer.raw).toBe(html);
+    const defs = outer.children[0] as HtmlElement;
+    const inner = defs.children[0] as HtmlElement;
+    expect(inner.attrs.id).toBe("inner");
+    expect(inner.raw).toBe('<svg id="inner"><rect/></svg>');
+  });
+
+  it("falls back to the rest of the input for an unterminated <svg>", () => {
+    const tree = parseHtmlFragment('<svg><path d="M0 0">');
+    const svg = tree[0] as HtmlElement;
+    expect(svg.raw).toBe('<svg><path d="M0 0">');
+  });
+});
+
+describe("findMermaidSources", () => {
+  it("prefers a nested [data-plain] attribute inside section[data-type=mermaid]", () => {
+    const html =
+      '<section data-type="mermaid" class="js-render-enrichment-target">' +
+      '<div data-plain="graph TD; A--&gt;B;" class="render-plain"></div>' +
+      '<pre lang="mermaid"><code>stale text</code></pre>' +
+      "</section>";
+    expect(findMermaidSources(html)).toEqual(["graph TD; A-->B;"]);
+  });
+
+  it("falls back to the nested pre[lang=mermaid] text when there is no [data-plain]", () => {
+    const html = '<section data-type="mermaid"><pre lang="mermaid">graph TD; A--&gt;B;</pre></section>';
+    expect(findMermaidSources(html)).toEqual(["graph TD; A-->B;"]);
+  });
+
+  it("matches a plain pre[lang=mermaid] with no wrapping section", () => {
+    const html = '<pre lang="mermaid">sequenceDiagram\nAlice->>Bob: Hi</pre>';
+    expect(findMermaidSources(html)).toEqual(["sequenceDiagram\nAlice->>Bob: Hi"]);
+  });
+
+  it("matches pre > code.language-mermaid", () => {
+    const html = '<pre><code class="hljs language-mermaid">graph LR; X --> Y;</code></pre>';
+    expect(findMermaidSources(html)).toEqual(["graph LR; X --> Y;"]);
+  });
+
+  it("finds multiple diagrams in document order without double-counting a section's own pre", () => {
+    const html =
+      '<section data-type="mermaid"><pre lang="mermaid">first</pre></section>' +
+      "<p>text between</p>" +
+      '<pre lang="mermaid">second</pre>';
+    expect(findMermaidSources(html)).toEqual(["first", "second"]);
+  });
+
+  it("returns an empty array when there is no mermaid diagram", () => {
+    expect(findMermaidSources("<p>just a paragraph</p><pre><code>plain code</code></pre>")).toEqual([]);
+  });
+});
+
+describe("hasMermaidClass", () => {
+  it("finds a bare class=\"mermaid\"", () => {
+    expect(hasMermaidClass('<div class="mermaid">graph TD; A-->B;</div>')).toBe(true);
+  });
+
+  it("finds mermaid as one of several classes, in any position", () => {
+    expect(hasMermaidClass('<pre class="code-block mermaid highlighted"><code>x</code></pre>')).toBe(true);
+  });
+
+  it("does not match a class that merely contains \"mermaid\" as a substring", () => {
+    expect(hasMermaidClass('<div class="mermaidish">not it</div>')).toBe(false);
+  });
+
+  it("is false when there is no mermaid class anywhere", () => {
+    expect(hasMermaidClass("<div><p class=\"note\">hello</p></div>")).toBe(false);
+  });
+});
+
+describe("findVideoSrc", () => {
+  function video(html: string): HtmlElement {
+    return parseHtmlFragment(html)[0] as HtmlElement;
+  }
+
+  it("uses the video element's own src", () => {
+    expect(findVideoSrc(video('<video src="https://example.com/a.mp4"></video>'))).toBe("https://example.com/a.mp4");
+  });
+
+  it("falls back to the first <source src> child", () => {
+    expect(
+      findVideoSrc(video('<video><source src="https://example.com/a.mp4" type="video/mp4"></video>')),
+    ).toBe("https://example.com/a.mp4");
+  });
+
+  it("picks the first source with a src among several", () => {
+    expect(
+      findVideoSrc(video('<video><source type="video/webm"><source src="https://example.com/a.mp4"></video>')),
+    ).toBe("https://example.com/a.mp4");
+  });
+
+  it("returns null when there is no src anywhere", () => {
+    expect(findVideoSrc(video("<video><source type=\"video/mp4\"></video>"))).toBeNull();
+  });
+});
+
+describe("svgDataUri", () => {
+  it("wraps raw SVG markup as a data: URI that decodes back to the original", () => {
+    const raw = '<svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>';
+    const uri = svgDataUri(raw);
+    expect(uri.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+    const encoded = uri.slice("data:image/svg+xml;charset=utf-8,".length);
+    expect(decodeURIComponent(encoded)).toBe(raw);
+  });
+});
+
+describe("svgDimensions", () => {
+  it("uses explicit width/height attributes when both are plain numbers", () => {
+    expect(svgDimensions({ width: "120", height: "80", viewBox: "0 0 999 999" })).toEqual({ width: 120, height: 80 });
+  });
+
+  it("falls back to viewBox width/height when width/height are missing", () => {
+    expect(svgDimensions({ viewBox: "0 0 100 50" })).toEqual({ width: 100, height: 50 });
+  });
+
+  it("falls back to viewBox when width/height have non-numeric units", () => {
+    expect(svgDimensions({ width: "100%", height: "auto", viewBox: "0 0 64 32" })).toEqual({ width: 64, height: 32 });
+  });
+
+  it("handles a viewBox with a negative origin", () => {
+    expect(svgDimensions({ viewBox: "-10 -5 200 100" })).toEqual({ width: 200, height: 100 });
+  });
+
+  it("returns null when neither width/height nor viewBox is usable", () => {
+    expect(svgDimensions({})).toBeNull();
   });
 });

@@ -12,7 +12,8 @@ import {
 } from "../server/decide/client";
 import { createDecisionService } from "../server/decide";
 import { setSettingsHandle } from "../server/core/settings";
-import { PrReviewSettingsSchema } from "../shared/settings";
+import { PrReviewSettingsSchema, type DepthRule } from "../shared/settings";
+import type { ModuleDepthInput } from "../server/core/services";
 
 function useProvider(provider: "openrouter" | "cloudflare" | "jev" | "custom", extra: Record<string, unknown> = {}) {
   const values = PrReviewSettingsSchema.parse({ decision: { provider, ...extra } });
@@ -328,6 +329,135 @@ describe("createDecisionService", () => {
       noiseProbability: null,
       risk: null,
       complexity: null,
+    });
+  });
+
+  describe("reviewDepth", () => {
+    const rules: DepthRule[] = [
+      { when: "Only tests or fixtures", level: "files", enabled: true },
+      { when: "Touches authentication", level: "code", enabled: true },
+    ];
+
+    function moduleInput(overrides: Partial<ModuleDepthInput> = {}): ModuleDepthInput {
+      return {
+        moduleId: "core",
+        title: "Core",
+        description: "Core business logic",
+        prTitle: "Add feature",
+        stats: "files=3 additions=10 deletions=2 effective_lines=12 max_risk=2",
+        files: ["modified src/core.ts (+10 -2)"],
+        declarations: ["modified function run"],
+        ...overrides,
+      };
+    }
+
+    function cloudflareNoulResponse(answers: Record<string, { type: "noul"; noul: number } | Record<string, never>>) {
+      return new Response(
+        JSON.stringify({ success: true, errors: [], result: { answers, usage: { input_tokens: 1 } } }),
+        { status: 200 },
+      );
+    }
+
+    it("asks one noul question per active rule (named rule_<i>), with module/description/pr_title/stats/files/declarations state", async () => {
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string);
+        expect(body.questions.rule_0.type).toBe("noul");
+        expect(body.questions.rule_0.instructions).toContain("Only tests or fixtures");
+        expect(body.questions.rule_1.instructions).toContain("Touches authentication");
+        expect(body.state).toEqual({
+          module: "Core",
+          description: "Core business logic",
+          pr_title: "Add feature",
+          stats: "files=3 additions=10 deletions=2 effective_lines=12 max_risk=2",
+          files: ["modified src/core.ts (+10 -2)"],
+          declarations: ["modified function run"],
+        });
+        return cloudflareNoulResponse({ rule_0: { type: "noul", noul: 0.1 }, rule_1: { type: "noul", noul: 0.9 } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const service = createDecisionService();
+      const [result] = await service.reviewDepth([moduleInput()], rules);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ level: "code", reason: "Touches authentication" });
+    });
+
+    it("matches a rule only at P >= DEPTH_RULE_MATCH_THRESHOLD (0.7)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => cloudflareNoulResponse({ rule_0: { type: "noul", noul: 0.69 }, rule_1: { type: "noul", noul: 0.3 } })),
+      );
+      const service = createDecisionService();
+      // Unique `title` (part of `state`) so this doesn't collide with another test's cached
+      // answer for the same (model, state, question) — the on-disk decision cache is shared
+      // across the whole file via `PASEO_HOME`.
+      const [result] = await service.reviewDepth([moduleInput({ title: "Core (threshold test)" })], rules);
+      expect(result).toBeNull(); // both below threshold -> no match
+    });
+
+    it("picks the deepest matching rule, ties going to the earlier one (pickRuleLevel)", async () => {
+      const threeRules: DepthRule[] = [
+        { when: "Only tests or fixtures", level: "files", enabled: true },
+        { when: "Touches authentication", level: "code", enabled: true },
+        { when: "Additive API surface", level: "declarations", enabled: true },
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          cloudflareNoulResponse({
+            rule_0: { type: "noul", noul: 0.9 },
+            rule_1: { type: "noul", noul: 0.9 },
+            rule_2: { type: "noul", noul: 0.9 },
+          }),
+        ),
+      );
+      const service = createDecisionService();
+      const [result] = await service.reviewDepth([moduleInput({ title: "Core (tie-break test)" })], threeRules);
+      // "code" (rule_1) outranks "declarations" (rule_2) even though rule_2 comes later.
+      expect(result).toEqual({ level: "code", reason: "Touches authentication" });
+    });
+
+    it("treats a missing/malformed answer for a rule as no match, not as an error", async () => {
+      // rule_1's answer is malformed; `evaluateOne` drops it from `answers` rather than failing
+      // the whole response, so reviewDepth must fall back to "no match" for that rule only.
+      vi.stubGlobal("fetch", vi.fn(async () => cloudflareNoulResponse({ rule_0: { type: "noul", noul: 0.95 }, rule_1: {} })));
+      const service = createDecisionService();
+      const [result] = await service.reviewDepth([moduleInput({ title: "Core (malformed-answer test)" })], rules);
+      expect(result).toEqual({ level: "files", reason: "Only tests or fixtures" });
+    });
+
+    it("returns null for a module when the whole request errors", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ success: false, errors: [{ message: "boom" }] }), { status: 400 })),
+      );
+      const service = createDecisionService();
+      const [result] = await service.reviewDepth([moduleInput({ title: "Core (request-error test)" })], rules);
+      expect(result).toBeNull();
+    });
+
+    it("returns null for every module without calling the API when there are no active rules", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const service = createDecisionService();
+      const noRules: DepthRule[] = [
+        { when: "   ", level: "code", enabled: true },
+        { when: "Disabled", level: "code", enabled: false },
+      ];
+      const results = await service.reviewDepth([moduleInput(), moduleInput({ moduleId: "ui" })], noRules);
+      expect(results).toEqual([null, null]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns null for every module without calling the API when the decision model isn't configured", async () => {
+      delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      delete process.env.CLOUDFLARE_API_TOKEN;
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const service = createDecisionService();
+      const results = await service.reviewDepth([moduleInput()], rules);
+      expect(results).toEqual([null]);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

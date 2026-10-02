@@ -5,16 +5,19 @@
 // responsibility to check `decisionsEnabled`/`decisionRepos` for the relevant repo before
 // invoking any of these. See server/validators/index.ts's `validatorsTestRpc` and
 // `localValidateRpc` handlers for the gate this module itself can't enforce.
-import type { PrSummary, ThreadTriage } from "../../shared/types";
+import type { DetailLevel, PrSummary, ThreadTriage } from "../../shared/types";
 import type {
   DecisionService,
   FileClassification,
   FileClassificationInput,
+  ModuleDepthInput,
   SystemOneAnswer,
   SystemOneQuestion,
   SystemOneRequest,
   SystemOneResponse,
 } from "../core/services";
+import type { DepthRule } from "../../shared/settings";
+import { activeDepthRules, DEPTH_RULE_MATCH_THRESHOLD, pickRuleLevel } from "../../shared/levels";
 import { getSettings } from "../core/settings";
 import { DecisionCache } from "./cache";
 import { cacheKey, callWithRetry, normalizeAnswer, probsToOrderedArray, resolveConfig, scoreTo1to5, unwrapResponse } from "./client";
@@ -353,6 +356,48 @@ export function createDecisionService(): DecisionService {
     return responses.map((res) => ("error" in res ? null : res.answers.attention?.type === "score" ? scoreTo1to5(res.answers.attention) : null));
   }
 
+  async function reviewDepth(inputs: ModuleDepthInput[], rules: DepthRule[]): Promise<Array<{ level: DetailLevel; reason: string } | null>> {
+    const active = activeDepthRules(rules);
+    if (active.length === 0 || inputs.length === 0) return inputs.map(() => null);
+    const { config } = await resolveConfig();
+    if (!config) return inputs.map(() => null);
+
+    // One request per module, one `noul` question per active rule — matches the `noise`/
+    // `substantive` question style elsewhere in this file (no `criteria`, just instructions).
+    const requests: SystemOneRequest[] = inputs.map((input) => ({
+      state: {
+        module: input.title,
+        description: input.description,
+        pr_title: input.prTitle,
+        stats: input.stats,
+        files: input.files,
+        declarations: input.declarations,
+      },
+      questions: Object.fromEntries(
+        active.map((rule, i) => [
+          `rule_${i}`,
+          {
+            type: "noul" as const,
+            instructions: `Does this module's change match the condition "${rule.when.trim()}"? Consider \`module\`, \`description\`, \`files\` and \`declarations\`.`,
+          },
+        ]),
+      ),
+    }));
+
+    const responses = await evaluate(requests);
+    return responses.map((res) => {
+      // A whole-request error (e.g. the batch call itself failed) — no recommendation for this
+      // module, as opposed to a single missing answer within an otherwise-successful response.
+      if ("error" in res) return null;
+      const matches = active.map((_, i) => {
+        const answer = res.answers[`rule_${i}`];
+        // Missing/malformed answers are already filtered out by `evaluateOne`; treat as no match.
+        return answer?.type === "noul" && answer.noul >= DEPTH_RULE_MATCH_THRESHOLD;
+      });
+      return pickRuleLevel(active, matches);
+    });
+  }
+
   return {
     status,
     evaluate,
@@ -361,5 +406,6 @@ export function createDecisionService(): DecisionService {
     triageThreads,
     substantiveChange,
     attention,
+    reviewDepth,
   };
 }

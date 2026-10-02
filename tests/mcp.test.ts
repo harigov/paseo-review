@@ -28,7 +28,7 @@ const analysis: Analysis = {
   severityProbabilities: null,
   totals: { files: 1, additions: 1, deletions: 0, effectiveLines: 1, movedLines: 0, noiseFiles: 0 },
   modules: [
-    { id: "core", title: "Core", rank: 0, description: "", fileCount: 1, additions: 1, deletions: 0, effectiveLines: 1, maxRisk: null, viewedFiles: 0, summary: null },
+    { id: "core", title: "Core", rank: 0, description: "", fileCount: 1, additions: 1, deletions: 0, effectiveLines: 1, maxRisk: null, viewedFiles: 0, summary: null, recommendedLevel: null, levelReason: null },
   ],
   files: [
     {
@@ -62,6 +62,7 @@ const analysis: Analysis = {
   visualOverviewHtml: null,
   guidanceFiles: [],
   threadTriage: {},
+  depthRulesHash: null,
 };
 
 const prDetail: PrDetail = {
@@ -124,7 +125,7 @@ beforeAll(() => {
     listRepos: async () => ({ repos: [repo], errors: [] }),
     findRepo: async () => repo,
     getViewer: async () => "octocat",
-    listInbox: async () => ({ viewer: "octocat", prs: [], fetchedAt: new Date().toISOString(), errors: [] }),
+    listInbox: async () => ({ viewer: "octocat", prs: [], fetchedAt: new Date().toISOString(), errors: [], refreshing: false }),
     getPr: async () => prDetail,
     setViewed: async () => "VIEWED",
   };
@@ -143,6 +144,7 @@ beforeAll(() => {
     moveFile: async () => undefined,
     getInboxEnrichment: async () => null,
     patchAnalysis: async () => undefined,
+    recomputeDepth: async () => {},
   };
 });
 

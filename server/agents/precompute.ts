@@ -87,7 +87,12 @@ export async function runOnce(): Promise<void> {
   let runError: string | null = null;
 
   try {
-    const { prs } = await services.github.listInbox();
+    // Force a fresh fetch (not just whatever the SWR cache happens to be serving): the precompute
+    // loop runs every `intervalMinutes` (default 10), well past the inbox's 60 s staleness
+    // window, and candidates are picked by comparing `pr.headSha` against the last-analyzed sha —
+    // a stale snapshot could miss commits pushed since. This also keeps the on-disk inbox
+    // snapshot warm, so the first "PR Review" open after a daemon restart is instant too.
+    const { prs } = await services.github.listInbox(true);
     const candidates = prs.filter((pr) => {
       if (settings.precompute.skipDrafts && pr.isDraft) return false;
       if (pr.changedFiles > settings.precompute.maxFiles) return false;

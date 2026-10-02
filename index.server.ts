@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createAgentService, registerAgentHandlers, startBackground } from "./server/agents";
 import { createAnalysisService, registerAnalysisHandlers } from "./server/analysis";
+import { registerAssetHandlers } from "./server/assets";
 import { rememberPaseo } from "./server/core/paseo";
 import { services } from "./server/core/services";
 import { setSettingsHandle } from "./server/core/settings";
@@ -26,6 +27,7 @@ export default function contribute(server: PluginServerContext) {
   registerValidatorHandlers(server);
   registerAgentHandlers(server);
   registerUiStateHandlers(server);
+  registerAssetHandlers(server);
 
   // Capture the daemon API from lifecycle events too, so precompute can start without a UI visit.
   const stopHook = server.on("agent.turn_ended", (_event, context) => rememberPaseo(context.paseo));

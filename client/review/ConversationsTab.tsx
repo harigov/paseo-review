@@ -157,7 +157,12 @@ export function ConversationsTab(props: PrTabContext) {
           <Pressable
             accessibilityRole="button"
             onPress={() =>
-              openChat(`Thread on ${thread.path}${thread.line ? `:${thread.line}` : ""}\n\n${thread.comments.map((cm) => `${cm.author}: ${cm.body}`).join("\n")}`)
+              openChat({
+                context: {
+                  label: `Thread on ${thread.path}${thread.line ? `:${thread.line}` : ""}`,
+                  text: `Thread on ${thread.path}${thread.line ? `:${thread.line}` : ""}\n\n${thread.comments.map((cm) => `${cm.author}: ${cm.body}`).join("\n")}`,
+                },
+              })
             }
           >
             <Text style={{ ...font.small, color: c.accent }}>Ask agent</Text>

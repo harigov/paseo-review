@@ -290,11 +290,16 @@ async function startChat(
       systemPrompt,
       ...mcpAgentFields(mcp),
     };
-    const prompt = input.seed?.trim() || "Give me a 5-bullet orientation to this PR and wait for questions.";
+    // No default prompt: the agent sits idle with its system prompt + context pack until the
+    // user actually asks something (plan §4). `prompt` stays optional on `agents.create`, so a
+    // caller-supplied `seed` is still honored as the agent's first turn, same as reuse below.
+    const seed = input.seed?.trim();
     const labels = { "pr-review.kind": "chat", "pr-review.pr": key };
     const title = `PR #${input.number} · ${pr.summary.title}`.slice(0, 120);
 
-    const agent = await paseo.workspaces.ref(workspaceId).agents.create({ config, title, labels, prompt });
+    const agent = await paseo.workspaces
+      .ref(workspaceId)
+      .agents.create({ config, title, labels, ...(seed ? { prompt: seed } : {}) });
 
     chats[key] = { agentId: agent.id, workspaceId };
     writeChats(chats);

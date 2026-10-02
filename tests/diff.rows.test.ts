@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   buildStreamRows,
+  defaultFileLevel,
   fileSegments,
   formatHunkHeader,
   hunkContext,
+  openFileLevel,
   outlineSummary,
+  overlappingHunkIndices,
   stickyIndices,
   type BuildStreamRowsInput,
   type ComposerTarget,
   type DraftLike,
+  type Row,
   type StreamFileInput,
 } from "../client/diff/rows";
 import type { AnalyzedFile, DiffLine, FileDiff, Hunk, OutlineEntry, Thread } from "../shared/types";
@@ -69,7 +73,7 @@ function analyzedFile(partial: Partial<AnalyzedFile> & { path: string }): Analyz
 
 function baseFileInput(partial: Partial<StreamFileInput> & { file: AnalyzedFile }): StreamFileInput {
   return {
-    expanded: false,
+    level: "files",
     viewed: partial.file.viewed,
     mode: "text",
     outlineExpanded: false,
@@ -79,6 +83,7 @@ function baseFileInput(partial: Partial<StreamFileInput> & { file: AnalyzedFile 
     diff: null,
     diffErrorMessage: null,
     expandedHunks: new Set(),
+    expandedDecls: new Set(),
     totalLines: null,
     contextLines: new Map(),
     threads: [],
@@ -116,8 +121,32 @@ function finding(partial: Partial<FileDiffFinding> & { validatorId: string; path
   };
 }
 
+function outlineEntry(partial: Partial<OutlineEntry> & { name: string }): OutlineEntry {
+  return {
+    kind: "function",
+    change: "modified",
+    exported: false,
+    signature: `function ${partial.name}()`,
+    oldSignature: null,
+    newStart: 1,
+    newEnd: 3,
+    oldStart: null,
+    oldEnd: null,
+    changedLines: 3,
+    counterpart: null,
+    ...partial,
+  };
+}
+
 function draft(partial: Partial<DraftLike> & { id: number; path: string; line: number; side: "LEFT" | "RIGHT" }): DraftLike {
   return { body: "draft body", ...partial };
+}
+
+/** Every row but `empty` carries `rail`; this throws on `empty` rather than silently returning
+ * `undefined`, since no test here should ever be asserting on an empty row's rail. */
+function rail(row: Row): 0 | 1 {
+  if (row.type === "empty") throw new Error("empty row has no rail");
+  return row.rail;
 }
 
 describe("buildStreamRows — basic two-file module", () => {
@@ -133,18 +162,18 @@ describe("buildStreamRows — basic two-file module", () => {
       split,
       composer: null,
       files: [
-        baseFileInput({ file: fileA, expanded: true, diff: diffA }),
-        baseFileInput({ file: fileB, expanded: false }),
+        baseFileInput({ file: fileA, level: "code", diff: diffA }),
+        baseFileInput({ file: fileB, level: "files" }),
       ],
     };
   }
 
   it("emits a fileHeader for every visible file, and only expands the expanded one (inline)", () => {
     const rows = buildStreamRows(build(false));
-    expect(rows[0]).toMatchObject({ type: "fileHeader", path: "a.ts", expanded: true });
+    expect(rows[0]).toMatchObject({ type: "fileHeader", path: "a.ts", level: "code" });
     // b.ts is collapsed: just its header, nothing else.
     const bIndex = rows.findIndex((r) => r.type === "fileHeader" && r.path === "b.ts");
-    expect(rows[bIndex]).toMatchObject({ type: "fileHeader", path: "b.ts", expanded: false });
+    expect(rows[bIndex]).toMatchObject({ type: "fileHeader", path: "b.ts", level: "files" });
     expect(rows[bIndex + 1]).toBeUndefined();
   });
 
@@ -176,7 +205,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff, threads: [t] })],
+      files: [baseFileInput({ file, level: "code", diff, threads: [t] })],
     });
     const addIndex = rows.findIndex((r) => r.type === "line" && r.lineIndex === 2); // add(2)
     expect(rows[addIndex + 1]).toMatchObject({ type: "thread", thread: t });
@@ -187,7 +216,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff, drafts: [d] })],
+      files: [baseFileInput({ file, level: "code", diff, drafts: [d] })],
     });
     const addIndex = rows.findIndex((r) => r.type === "line" && r.lineIndex === 2);
     expect(rows[addIndex + 1]).toMatchObject({ type: "draft", draftId: 7 });
@@ -198,7 +227,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff, findings: [f] })],
+      files: [baseFileInput({ file, level: "code", diff, findings: [f] })],
     });
     const addIndex = rows.findIndex((r) => r.type === "line" && r.lineIndex === 2);
     expect(rows[addIndex + 1]).toMatchObject({ type: "finding", finding: f });
@@ -209,7 +238,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: false,
       composer,
-      files: [baseFileInput({ file, expanded: true, diff })],
+      files: [baseFileInput({ file, level: "code", diff })],
     });
     const addIndex = rows.findIndex((r) => r.type === "line" && r.lineIndex === 2);
     expect(rows[addIndex + 1]).toMatchObject({ type: "composer", side: "RIGHT", line: 2, mode: "new" });
@@ -221,7 +250,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: true,
       composer,
-      files: [baseFileInput({ file, expanded: true, diff })],
+      files: [baseFileInput({ file, level: "code", diff })],
     });
     const pairIndex = rows.findIndex((r) => r.type === "pair" && r.oldIndex === 1); // del(2) at hunk index 1
     expect(rows[pairIndex + 1]).toMatchObject({ type: "composer", side: "LEFT", line: 2, mode: "editDraft", draftId: 3 });
@@ -232,7 +261,7 @@ describe("buildStreamRows — thread/finding/draft/composer placement", () => {
     const rows = buildStreamRows({
       split: false,
       composer,
-      files: [baseFileInput({ file, expanded: true, diff })],
+      files: [baseFileInput({ file, level: "code", diff })],
     });
     expect(rows.some((r) => r.type === "composer")).toBe(false);
   });
@@ -247,7 +276,7 @@ describe("buildStreamRows — collapsed hunks", () => {
     const collapsedRows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff })],
+      files: [baseFileInput({ file, level: "code", diff })],
     });
     expect(collapsedRows.some((r) => r.type === "collapsed" && r.kind === "moved" && r.count === 2)).toBe(true);
     expect(collapsedRows.some((r) => r.type === "line")).toBe(false);
@@ -255,7 +284,7 @@ describe("buildStreamRows — collapsed hunks", () => {
     const expandedRows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff, expandedHunks: new Set([0]) })],
+      files: [baseFileInput({ file, level: "code", diff, expandedHunks: new Set([0]) })],
     });
     expect(expandedRows.some((r) => r.type === "collapsed")).toBe(false);
     expect(expandedRows.filter((r) => r.type === "line")).toHaveLength(2);
@@ -266,7 +295,7 @@ describe("buildStreamRows — collapsed hunks", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff: fileDiff({ path: "a.ts", hunks: [wsHunk] }) })],
+      files: [baseFileInput({ file, level: "code", diff: fileDiff({ path: "a.ts", hunks: [wsHunk] }) })],
     });
     expect(rows.some((r) => r.type === "collapsed" && r.kind === "whitespace")).toBe(true);
   });
@@ -282,7 +311,7 @@ describe("buildStreamRows — collapsed hunks", () => {
     const collapsedRows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff: diffWithGap, contextLines: fetched })],
+      files: [baseFileInput({ file, level: "code", diff: diffWithGap, contextLines: fetched })],
     });
     expect(collapsedRows.some((r) => r.type === "expandContext")).toBe(false);
     expect(collapsedRows.some((r) => r.type === "line")).toBe(false);
@@ -290,7 +319,7 @@ describe("buildStreamRows — collapsed hunks", () => {
     const expandedRows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, diff: diffWithGap, contextLines: fetched, expandedHunks: new Set([0]) })],
+      files: [baseFileInput({ file, level: "code", diff: diffWithGap, contextLines: fetched, expandedHunks: new Set([0]) })],
     });
     expect(expandedRows.find((r) => r.type === "expandContext" && r.position === "above")).toMatchObject({ count: 8 });
     expect(expandedRows.some((r) => r.type === "line" && r.hunkIndex === 0 && r.lineIndex === 0)).toBe(true);
@@ -304,7 +333,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }) })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h] }) })],
     });
     const above = rows.find((r) => r.type === "expandContext");
     expect(above).toMatchObject({ type: "expandContext", position: "above", count: 9 });
@@ -316,7 +345,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
     });
     const between = rows.find((r) => r.type === "expandContext" && r.position === "between");
     expect(between).toMatchObject({ position: "between", oldStart: 2, newStart: 2, count: 18 });
@@ -328,7 +357,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
     });
     expect(rows.some((r) => r.type === "expandContext")).toBe(false);
   });
@@ -338,7 +367,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: null })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: null })],
     });
     expect(rows.some((r) => r.type === "expandContext" && r.position === "below")).toBe(false);
   });
@@ -348,7 +377,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: 25 })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: 25 })],
     });
     const lastLineIndex = rows.findIndex((r) => r.type === "line");
     const below = rows.find((r) => r.type === "expandContext" && r.position === "below");
@@ -364,7 +393,7 @@ describe("expand-context placeholders", () => {
       split: false,
       composer: null,
       files: [
-        baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), contextLines: fetched }),
+        baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h] }), contextLines: fetched }),
       ],
     });
     const placeholder = rows.find((r) => r.type === "expandContext");
@@ -387,7 +416,7 @@ describe("expand-context placeholders", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
     });
     const between = rows.find((r) => r.type === "expandContext" && r.position === "between");
     expect(between).toMatchObject({ position: "between", oldStart: 6, newStart: 8, count: 2, totalCount: 2 });
@@ -404,7 +433,7 @@ describe("expand-context placeholders", () => {
       files: [
         baseFileInput({
           file: analyzedFile({ path: "a.ts" }),
-          expanded: true,
+          level: "code",
           diff: fileDiff({ path: "a.ts", hunks: [h1, h2], truncated: true }),
         }),
       ],
@@ -420,7 +449,7 @@ describe("fileMeta uses the resolved viewed state, not the raw file flag", () =>
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, viewed: "VIEWED" })],
+      files: [baseFileInput({ file, level: "code", viewed: "VIEWED" })],
     });
     const meta = rows.find((r) => r.type === "fileMeta");
     expect(meta).toMatchObject({ viewed: "VIEWED" });
@@ -428,37 +457,40 @@ describe("fileMeta uses the resolved viewed state, not the raw file flag", () =>
 });
 
 describe("loading / error / empty / structural / outline rows", () => {
-  it("emits a loading row while the file's diff query is in flight", () => {
+  it("emits a loading row while the file's diff query is in flight, followed by fileEnd", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diffStatus: "loading", diff: null })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diffStatus: "loading", diff: null })],
     });
-    expect(rows[rows.length - 1]).toMatchObject({ type: "loading", path: "a.ts" });
+    expect(rows[rows.length - 2]).toMatchObject({ type: "loading", path: "a.ts" });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd", path: "a.ts" });
   });
 
-  it("emits an error row (danger tone) when the diff query failed", () => {
+  it("emits an error row (danger tone) when the diff query failed, followed by fileEnd", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diffStatus: "error", diffErrorMessage: "boom" })],
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), level: "code", diffStatus: "error", diffErrorMessage: "boom" })],
     });
-    expect(rows[rows.length - 1]).toMatchObject({ type: "error", message: "boom", tone: "danger" });
+    expect(rows[rows.length - 2]).toMatchObject({ type: "error", message: "boom", tone: "danger" });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd" });
   });
 
-  it("emits a muted error row for a binary file", () => {
+  it("emits a muted error row for a binary file, followed by fileEnd", () => {
     const rows = buildStreamRows({
       split: false,
       composer: null,
       files: [
         baseFileInput({
           file: analyzedFile({ path: "a.png" }),
-          expanded: true,
+          level: "code",
           diff: fileDiff({ path: "a.png", binary: true, hunks: [] }),
         }),
       ],
     });
-    expect(rows[rows.length - 1]).toMatchObject({ type: "error", tone: "muted" });
+    expect(rows[rows.length - 2]).toMatchObject({ type: "error", tone: "muted" });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd" });
   });
 
   it("emits a single empty row (with the since-last-review reason) when there are no visible files", () => {
@@ -466,14 +498,15 @@ describe("loading / error / empty / structural / outline rows", () => {
     expect(rows).toEqual([{ type: "empty", key: "empty", path: "", reason: "since_last_review" }]);
   });
 
-  it("emits a structural row instead of diff rows in structure mode", () => {
+  it("emits a structural row instead of diff rows in structure mode, followed by fileEnd", () => {
     const file = analyzedFile({ path: "pkg-lock.json", structuralKind: "lockfile" });
     const rows = buildStreamRows({
       split: false,
       composer: null,
-      files: [baseFileInput({ file, expanded: true, mode: "structure" })],
+      files: [baseFileInput({ file, level: "code", mode: "structure" })],
     });
-    expect(rows[rows.length - 1]).toMatchObject({ type: "structural", path: "pkg-lock.json" });
+    expect(rows[rows.length - 2]).toMatchObject({ type: "structural", path: "pkg-lock.json" });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd" });
   });
 
   it("emits an outline row with the precomputed summary when the file has outline entries", () => {
@@ -500,7 +533,7 @@ describe("loading / error / empty / structural / outline rows", () => {
       files: [
         baseFileInput({
           file,
-          expanded: true,
+          level: "code",
           diff: fileDiff({ path: "a.ts", hunks: [] }),
           outlineSummary: outlineSummary(entries),
         }),
@@ -521,8 +554,8 @@ describe("stickyIndices", () => {
       split: false,
       composer: null,
       files: [
-        baseFileInput({ file: fileA, expanded: true, diff: fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1)] })] }) }),
-        baseFileInput({ file: fileB, expanded: false }),
+        baseFileInput({ file: fileA, level: "code", diff: fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1)] })] }) }),
+        baseFileInput({ file: fileB, level: "files" }),
       ],
     });
     const indices = stickyIndices(rows);
@@ -540,8 +573,8 @@ describe("fileSegments", () => {
       split: false,
       composer: null,
       files: [
-        baseFileInput({ file: fileA, expanded: true, diff: fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1), ctx(2, 2)] })] }) }),
-        baseFileInput({ file: fileB, expanded: false }),
+        baseFileInput({ file: fileA, level: "code", diff: fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1), ctx(2, 2)] })] }) }),
+        baseFileInput({ file: fileB, level: "files" }),
       ],
     });
     const segments = fileSegments(rows);
@@ -573,5 +606,263 @@ describe("hunkContext / formatHunkHeader", () => {
 
   it("formats as just the line range when there's no context", () => {
     expect(formatHunkHeader("", 34, 41)).toBe("L34–41");
+  });
+});
+
+describe("defaultFileLevel", () => {
+  it("collapses a VIEWED file to files regardless of module level or size", () => {
+    const file = analyzedFile({ path: "a.ts", effectiveLines: 1000, outline: [outlineEntry({ name: "foo" })] });
+    expect(defaultFileLevel(file, "code", "VIEWED")).toBe("files");
+    expect(defaultFileLevel(file, "declarations", "VIEWED")).toBe("files");
+  });
+
+  it("drops a huge Code-level file with an outline to declarations instead of opening it fully", () => {
+    const file = analyzedFile({ path: "a.ts", effectiveLines: 401, outline: [outlineEntry({ name: "foo" })] });
+    expect(defaultFileLevel(file, "code", "UNVIEWED")).toBe("declarations");
+  });
+
+  it("drops a huge Code-level file with only a structural view to declarations too", () => {
+    const file = analyzedFile({ path: "a.json", effectiveLines: 401, outline: null, structuralKind: "json" });
+    expect(defaultFileLevel(file, "code", "UNVIEWED")).toBe("declarations");
+  });
+
+  it("collapses a huge Code-level file with neither an outline nor a structural view to files", () => {
+    const file = analyzedFile({ path: "a.ts", effectiveLines: 401, outline: null, structuralKind: null });
+    expect(defaultFileLevel(file, "code", "UNVIEWED")).toBe("files");
+  });
+
+  it("opens a small unviewed Code-level file fully, same as today", () => {
+    const file = analyzedFile({ path: "a.ts", effectiveLines: 400, outline: null });
+    expect(defaultFileLevel(file, "code", "UNVIEWED")).toBe("code");
+  });
+
+  it("just follows the module level when the module isn't at Code, regardless of size", () => {
+    const file = analyzedFile({ path: "a.ts", effectiveLines: 1000, outline: null });
+    expect(defaultFileLevel(file, "declarations", "UNVIEWED")).toBe("declarations");
+    expect(defaultFileLevel(file, "files", "UNVIEWED")).toBe("files");
+  });
+});
+
+describe("openFileLevel", () => {
+  it("opens to the module's level when it isn't files", () => {
+    const file = analyzedFile({ path: "a.ts", outline: null, structuralKind: null });
+    expect(openFileLevel(file, "code")).toBe("code");
+    expect(openFileLevel(file, "declarations")).toBe("declarations");
+  });
+
+  it("opens to declarations when the module is at files but the file has an outline", () => {
+    const file = analyzedFile({ path: "a.ts", outline: [outlineEntry({ name: "foo" })] });
+    expect(openFileLevel(file, "files")).toBe("declarations");
+  });
+
+  it("opens to declarations when the module is at files but the file has a structural view", () => {
+    const file = analyzedFile({ path: "a.json", outline: null, structuralKind: "json" });
+    expect(openFileLevel(file, "files")).toBe("declarations");
+  });
+
+  it("opens straight to code when the module is at files and the file has neither", () => {
+    const file = analyzedFile({ path: "a.ts", outline: null, structuralKind: null });
+    expect(openFileLevel(file, "files")).toBe("code");
+  });
+});
+
+describe("overlappingHunkIndices", () => {
+  const h0 = hunk({ lines: [ctx(1, 1), del(2), add(2), ctx(3, 3)] }); // new range 1-3
+  const h1 = hunk({ lines: [ctx(10, 10)], oldStart: 10, newStart: 10 }); // new range 10-10
+  const hunks = [h0, h1];
+
+  it("picks the hunk overlapping a declaration's new-side range", () => {
+    expect(overlappingHunkIndices(hunks, { newStart: 1, newEnd: 2, oldStart: null, oldEnd: null })).toEqual([0]);
+    expect(overlappingHunkIndices(hunks, { newStart: 10, newEnd: 10, oldStart: null, oldEnd: null })).toEqual([1]);
+  });
+
+  it("falls back to the old-side range for a removed declaration (no new-side range)", () => {
+    const delOnly = hunk({ lines: [del(5), del(6)], oldStart: 5, newStart: 5 });
+    expect(overlappingHunkIndices([delOnly], { newStart: null, newEnd: null, oldStart: 5, oldEnd: 6 })).toEqual([0]);
+  });
+
+  it("returns every overlapping hunk, in hunk order", () => {
+    expect(overlappingHunkIndices(hunks, { newStart: 2, newEnd: 10, oldStart: null, oldEnd: null })).toEqual([0, 1]);
+  });
+
+  it("returns [] when the entry has neither a new- nor an old-side range", () => {
+    expect(overlappingHunkIndices(hunks, { newStart: null, newEnd: null, oldStart: null, oldEnd: null })).toEqual([]);
+  });
+
+  it("returns [] when nothing overlaps", () => {
+    expect(overlappingHunkIndices(hunks, { newStart: 100, newEnd: 101, oldStart: null, oldEnd: null })).toEqual([]);
+  });
+});
+
+describe("buildStreamRows — declarations level", () => {
+  it("shows the structural row (its equivalent of declarations) for a structural-kind file", () => {
+    const file = analyzedFile({ path: "pkg-lock.json", structuralKind: "lockfile" });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "declarations" })] });
+    expect(rows.map((r) => r.type)).toEqual(["fileHeader", "fileMeta", "structural", "fileEnd"]);
+  });
+
+  it("shows a muted notice for a binary file, without needing its diff", () => {
+    const file = analyzedFile({ path: "a.png", binary: true });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "declarations" })] });
+    expect(rows.map((r) => r.type)).toEqual(["fileHeader", "fileMeta", "error", "fileEnd"]);
+    expect(rows.find((r) => r.type === "error")).toMatchObject({ tone: "muted", message: "Binary file not shown." });
+  });
+
+  it("shows the noOutline row, with the changed-line count, when the file has no outline", () => {
+    const file = analyzedFile({ path: "a.txt", effectiveLines: 14, outline: null });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "declarations" })] });
+    expect(rows.map((r) => r.type)).toEqual(["fileHeader", "fileMeta", "noOutline", "fileEnd"]);
+    expect(rows.find((r) => r.type === "noOutline")).toMatchObject({ path: "a.txt", changedLines: 14 });
+  });
+
+  it("emits one decl row per outline entry, collapsed by default (no hunk rows)", () => {
+    const entries = [outlineEntry({ name: "foo", change: "added" }), outlineEntry({ name: "bar", change: "signature" })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "declarations" })] });
+    const declRows = rows.filter((r) => r.type === "decl");
+    expect(declRows).toHaveLength(2);
+    expect(declRows[0]).toMatchObject({ entry: entries[0], index: 0, expanded: false });
+    expect(declRows[1]).toMatchObject({ entry: entries[1], index: 1, expanded: false });
+    expect(rows.some((r) => r.type === "hunkHeader" || r.type === "line")).toBe(false);
+  });
+
+  it("drills down into only the hunks overlapping a pressed declaration's range", () => {
+    const entries = [outlineEntry({ name: "foo", newStart: 1, newEnd: 2 }), outlineEntry({ name: "bar", newStart: 10, newEnd: 10 })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const diff = fileDiff({
+      path: "a.ts",
+      hunks: [hunk({ lines: [ctx(1, 1), del(2), add(2), ctx(3, 3)] }), hunk({ lines: [ctx(10, 10)], oldStart: 10, newStart: 10 })],
+    });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diff, expandedDecls: new Set([0]) })],
+    });
+    expect(rows.some((r) => r.type === "hunkHeader" && r.hunkIndex === 0)).toBe(true);
+    expect(rows.some((r) => r.type === "hunkHeader" && r.hunkIndex === 1)).toBe(false);
+    const lineRows = rows.filter((r) => r.type === "line");
+    expect(lineRows).toHaveLength(4); // ctx(1,1), del(2), add(2), ctx(3,3) — hunk 0's lines only
+    expect(lineRows.every((r) => r.key.startsWith("decl:a.ts:0:"))).toBe(true);
+  });
+
+  it("keeps row keys unique when two declarations drill into the same shared hunk", () => {
+    const entries = [outlineEntry({ name: "foo", newStart: 1, newEnd: 3 }), outlineEntry({ name: "bar", newStart: 2, newEnd: 3 })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const diff = fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1), del(2), add(2), ctx(3, 3)] })] });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diff, expandedDecls: new Set([0, 1]) })],
+    });
+    const hunkHeaders = rows.filter((r) => r.type === "hunkHeader");
+    expect(hunkHeaders).toHaveLength(2); // the shared hunk, once per decl
+    expect(new Set(hunkHeaders.map((r) => r.key)).size).toBe(2);
+    const keys = rows.map((r) => r.key);
+    expect(new Set(keys).size).toBe(keys.length); // no duplicate keys anywhere in the file's rows
+  });
+
+  it("places thread/draft/finding/composer attachments under every decl whose drill-down covers that line, with decl-prefixed keys", () => {
+    const entries = [outlineEntry({ name: "foo", newStart: 1, newEnd: 3 }), outlineEntry({ name: "bar", newStart: 2, newEnd: 3 })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const diff = fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1), del(2), add(2), ctx(3, 3)] })] });
+    const t = thread({ id: "t1", path: "a.ts", diffSide: "RIGHT", line: 2 });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diff, expandedDecls: new Set([0, 1]), threads: [t] })],
+    });
+    const threadRows = rows.filter((r) => r.type === "thread");
+    expect(threadRows).toHaveLength(2);
+    expect(threadRows.map((r) => r.key)).toEqual(["decl:a.ts:0:a.ts:thread:t1", "decl:a.ts:1:a.ts:thread:t1"]);
+  });
+
+  it("shows a loading row under a drilled-down decl while the file's diff is still fetching", () => {
+    const entries = [outlineEntry({ name: "foo" })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diffStatus: "loading", diff: null, expandedDecls: new Set([0]) })],
+    });
+    expect(rows.filter((r) => r.type === "loading")).toHaveLength(1);
+  });
+
+  it("shows a danger error row under a drilled-down decl when the diff query failed", () => {
+    const entries = [outlineEntry({ name: "foo" })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diffStatus: "error", diffErrorMessage: "boom", expandedDecls: new Set([0]) })],
+    });
+    expect(rows.find((r) => r.type === "error")).toMatchObject({ tone: "danger", message: "boom" });
+  });
+
+  it("shows a muted notice under a drilled-down decl when nothing overlaps its range", () => {
+    const entries = [outlineEntry({ name: "foo", newStart: 100, newEnd: 101 })];
+    const file = analyzedFile({ path: "a.ts", outline: entries });
+    const diff = fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1)] })] });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, level: "declarations", diff, expandedDecls: new Set([0]) })],
+    });
+    expect(rows.find((r) => r.type === "error")).toMatchObject({ tone: "muted", message: "No changed lines in this range." });
+  });
+});
+
+describe("fileEnd row", () => {
+  it("appears after a Code-level file's content, carrying the file for its +/- display", () => {
+    const file = analyzedFile({ path: "a.ts", additions: 3, deletions: 1 });
+    const diff = fileDiff({ path: "a.ts", hunks: [hunk({ lines: [ctx(1, 1)] })] });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "code", diff })] });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd", path: "a.ts", file });
+  });
+
+  it("appears after a Declarations-level file's content too", () => {
+    const file = analyzedFile({ path: "a.ts", outline: null });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "declarations" })] });
+    expect(rows[rows.length - 1]).toMatchObject({ type: "fileEnd", path: "a.ts" });
+  });
+
+  it("is omitted entirely for a Files-level (collapsed) file", () => {
+    const file = analyzedFile({ path: "a.ts" });
+    const rows = buildStreamRows({ split: false, composer: null, files: [baseFileInput({ file, level: "files" })] });
+    expect(rows).toHaveLength(1); // just the fileHeader
+    expect(rows.some((r) => r.type === "fileEnd")).toBe(false);
+  });
+});
+
+describe("file boundary rail", () => {
+  it("alternates by the file's position among the visible files, independent of level", () => {
+    const fileA = analyzedFile({ path: "a.ts" });
+    const fileB = analyzedFile({ path: "b.ts" });
+    const fileC = analyzedFile({ path: "c.ts" });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [
+        baseFileInput({ file: fileA, level: "files" }),
+        baseFileInput({ file: fileB, level: "declarations" }),
+        baseFileInput({ file: fileC, level: "files" }),
+      ],
+    });
+    expect(rows.filter((r) => r.path === "a.ts").every((r) => rail(r) === 0)).toBe(true);
+    expect(rows.filter((r) => r.path === "b.ts").every((r) => rail(r) === 1)).toBe(true);
+    expect(rows.filter((r) => r.path === "c.ts").every((r) => rail(r) === 0)).toBe(true);
+  });
+
+  it("gives every row belonging to a file the same rail, including its fileEnd row", () => {
+    const other = analyzedFile({ path: "a-earlier.ts" });
+    const file = analyzedFile({ path: "b.ts" });
+    const diff = fileDiff({ path: "b.ts", hunks: [hunk({ lines: [ctx(1, 1)] })] });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file: other, level: "files" }), baseFileInput({ file, level: "code", diff })],
+    });
+    const bRows = rows.filter((r) => r.path === "b.ts");
+    expect(bRows.length).toBeGreaterThan(1);
+    expect(bRows.every((r) => rail(r) === 1)).toBe(true);
   });
 });

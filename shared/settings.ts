@@ -1,8 +1,20 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
-import { DiffLayoutSchema } from "./types";
+import { DetailLevelSchema, DiffLayoutSchema } from "./types";
 
 export const DecisionProviderSchema = z.enum(["openrouter", "cloudflare", "jev", "custom"]);
+
+/**
+ * One review-depth rule: a plain-language condition the decision model checks against each
+ * module (e.g. "Touches authentication, payments, or data migrations"), and the depth to use
+ * when it matches. Among matching rules the deepest level wins (ties: the earlier rule).
+ */
+export const DepthRuleSchema = z.object({
+  when: z.string(),
+  level: DetailLevelSchema,
+  enabled: z.boolean().default(true),
+});
+export type DepthRule = z.infer<typeof DepthRuleSchema>;
 
 export const PrReviewSettingsSchema = z.object({
   decision: z
@@ -60,6 +72,9 @@ export const PrReviewSettingsSchema = z.object({
   diffLayout: DiffLayoutSchema.default("inline"),
   /** Code size / row height in the diff viewer. */
   diffDensity: z.enum(["comfortable", "compact"]).default("comfortable"),
+  /** Rules the decision model uses to pick each module's review depth (repos opted in to the
+   * decision model only). No enabled rules = the deterministic default in shared/levels.ts. */
+  reviewDepth: z.object({ rules: z.array(DepthRuleSchema).default([]) }).default({ rules: [] }),
 });
 
 export type PrReviewSettings = z.infer<typeof PrReviewSettingsSchema>;

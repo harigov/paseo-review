@@ -10,3 +10,9 @@ export function relativeAge(iso: string): string {
   if (days < 30) return `${days}d`;
   return `${Math.round(days / 30)}mo`;
 }
+
+/** "3m ago", or "just now" (never "just now ago"). */
+export function agoLabel(iso: string): string {
+  const age = relativeAge(iso);
+  return age === "just now" ? age : `${age} ago`;
+}

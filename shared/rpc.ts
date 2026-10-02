@@ -38,6 +38,9 @@ export const inboxListRpc = defineRpc({
     prs: z.array(PrSummarySchema),
     fetchedAt: z.string(),
     errors: z.array(z.string()),
+    /** True while a background refresh is in flight: `prs` is the last snapshot (possibly
+     * minutes old, per `fetchedAt`); poll again shortly for the fresh list. */
+    refreshing: z.boolean().default(false),
   }),
 });
 
@@ -109,6 +112,14 @@ export const jobPollRpc = defineRpc({
   name: "prr.job.poll",
   input: z.object({ jobId: z.string(), waitMs: z.number().max(20_000).optional() }),
   output: JobSchema,
+});
+
+/** Recomputes `modules[].recommendedLevel` for the cached analysis from the current depth rules
+ * (Settings → Review depth) without re-running the pipeline. Returns a job; poll with prr.job.poll. */
+export const depthRecomputeRpc = defineRpc({
+  name: "prr.depth.recompute",
+  input: PrRef,
+  output: z.object({ jobId: z.string() }),
 });
 
 export const prAnalysisRpc = defineRpc({
@@ -256,5 +267,24 @@ export const precomputeStatusRpc = defineRpc({
     queued: z.number(),
     agentJobsToday: z.number(),
     lastError: z.string().nullable(),
+  }),
+});
+
+// ---------- static assets (server/assets) ----------
+
+/** Large client-side runtimes served from the plugin's own production dependencies instead of
+ * the client bundle, fetched lazily in ≤ 512 KiB chunks: call with offset 0, then `nextOffset`
+ * until it is null. `text: null` (with `message`) when the asset can't be found. */
+export const AssetNameSchema = z.enum(["mermaid"]);
+export type AssetName = z.infer<typeof AssetNameSchema>;
+
+export const assetGetRpc = defineRpc({
+  name: "prr.asset.get",
+  input: z.object({ name: AssetNameSchema, offset: z.number().int().min(0).default(0) }),
+  output: z.object({
+    text: z.string().nullable(),
+    nextOffset: z.number().int().nullable(),
+    total: z.number().int(),
+    message: z.string().nullable(),
   }),
 });

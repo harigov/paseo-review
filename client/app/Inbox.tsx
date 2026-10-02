@@ -6,10 +6,10 @@ import { useInbox, useRepos } from "../data/hooks";
 import type { InboxSection, PrSummary } from "../../shared/types";
 import type { InboxFilters, RecentPr } from "../../shared/ui-state";
 import { rememberInboxFilters, useInboxFilters, useRecentPrs } from "./ui-state";
-import { relativeAge } from "../ui/time";
+import { agoLabel, relativeAge } from "../ui/time";
 import { font, radius, space, surfaces } from "../ui/tokens";
 import { Dot } from "../ui/chips";
-import { EmptyState, ErrorState, Skeleton } from "../ui/states";
+import { EmptyState, ErrorState, InlineLoading, Skeleton } from "../ui/states";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 type ReviewDecision = PrSummary["reviewDecision"];
@@ -185,6 +185,10 @@ export function Inbox({
 
   const prs = inbox.data?.prs ?? [];
   const errors = inbox.data?.errors ?? [];
+  // `inbox.data?.refreshing` is the server's background revalidation of a stale snapshot;
+  // `inbox.refreshing` is this client's own forced refresh (the refresh button). Either one
+  // means "the list on screen may be about to change."
+  const isRefreshing = inbox.refreshing || !!inbox.data?.refreshing;
   const haveAttention = prs.some((pr) => pr.attention !== null);
   const effectiveSort: SortKey = sort === "attention" && !haveAttention ? "updated" : sort;
 
@@ -336,6 +340,9 @@ export function Inbox({
               style={{ ...s.input, flex: 1 }}
             />
           </View>
+          {inbox.data && (
+            <Text style={{ ...font.caption, color: c.foregroundMuted }}>Updated {agoLabel(inbox.data.fetchedAt)}</Text>
+          )}
           <Pressable
             accessibilityRole="button"
             onPress={() => inbox.refresh()}
@@ -344,6 +351,7 @@ export function Inbox({
             <Icon name="RefreshCw" size={14} color={c.foreground} />
           </Pressable>
         </View>
+        {isRefreshing && <InlineLoading theme={theme} label="Refreshing…" />}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs + 2 }}>
           {(repos.data?.repos ?? []).map((repo) => (
             <FilterChip c={c} key={repo.slug} label={repo.slug} active={repoFilter === repo.slug} onPress={() => setRepoFilter((cur) => (cur === repo.slug ? null : repo.slug))} />
@@ -438,8 +446,8 @@ export function Inbox({
                     {recent.title}
                   </Text>
                   <Text style={{ ...font.small, color: c.foregroundMuted }}>
-                    {recent.repo}#{recent.number} · opened {relativeAge(recent.openedAt)} ago
-                    {recent.reviewedAt ? ` · reviewed ${relativeAge(recent.reviewedAt)} ago` : ""}
+                    {recent.repo}#{recent.number} · opened {agoLabel(recent.openedAt)}
+                    {recent.reviewedAt ? ` · reviewed ${agoLabel(recent.reviewedAt)}` : ""}
                   </Text>
                 </Pressable>
               );

@@ -2,6 +2,7 @@ import type { JobUpdate } from "../core/jobs";
 import { services } from "../core/services";
 import type { Analysis, AnalyzedFile, Module, OutlineEntry, ThreadTriage } from "../../shared/types";
 import { extractRichHtml } from "../../shared/rich-html";
+import { computeModuleDepth } from "./depth";
 import { annotateMovesAndWhitespace, parseUnifiedDiff, type ParsedFile } from "./diff";
 import { ensureMirror, fetchPrRefs, mergeBase as computeMergeBase, rawDiff, showFile } from "./git";
 import { classifyHeuristic, DEFAULT_MODULES, loadRepoOverride, parseGitAttributes, resolveTaxonomy, type HeuristicResult, type ModuleDef } from "./modules";
@@ -300,8 +301,25 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
       maxRisk: risks.length ? Math.max(...risks) : null,
       viewedFiles: inModule.filter((f) => f.viewed === "VIEWED").length,
       summary: existing && existing.headSha === headSha ? existing.modules.find((em) => em.id === m.id)?.summary ?? null : null,
+      recommendedLevel: null,
+      levelReason: null,
     };
   });
+
+  // Review depth: asks the decision model which of the user's rules (Settings → Review depth)
+  // each module matches. `computeModuleDepth` is itself best-effort and never throws, but it's
+  // still wrapped here — a stage this late in the pipeline must not cost the analysis that
+  // already succeeded.
+  update.stage("depth", 0.9);
+  let modulesWithDepth: Module[] = modules;
+  let depthHash: string | null = null;
+  try {
+    const depth = await computeModuleDepth({ repo: repoSlug, modules, files, decisionsEnabled, prTitle: detail.summary.title });
+    modulesWithDepth = depth.modules;
+    depthHash = depth.depthRulesHash;
+  } catch (error) {
+    console.error("[pr-review] review-depth stage failed:", error);
+  }
 
   update.stage("assemble", 0.95);
   const richDescriptionHtml = extractRichHtml(detail.body);
@@ -336,7 +354,7 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
       movedLines: parsedFiles.reduce((s, f) => s + f.movedLines, 0),
       noiseFiles: files.filter((f) => f.moduleId === "noise").length,
     },
-    modules,
+    modules: modulesWithDepth,
     files,
     validators,
     sinceAnchorSha,
@@ -345,6 +363,7 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
     visualOverviewHtml: existing && existing.headSha === headSha ? existing.visualOverviewHtml : null,
     guidanceFiles,
     threadTriage,
+    depthRulesHash: depthHash,
   };
 
   saveAnalysis(repo.slug, number, analysis);

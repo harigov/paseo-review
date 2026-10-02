@@ -263,6 +263,10 @@ export const AnalyzedFileSchema = z.object({
 });
 export type AnalyzedFile = z.infer<typeof AnalyzedFileSchema>;
 
+/** How deep to read a module or file: one row per file, changed declarations only, or the full diff. */
+export const DetailLevelSchema = z.enum(["files", "declarations", "code"]);
+export type DetailLevel = z.infer<typeof DetailLevelSchema>;
+
 export const ModuleSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -275,6 +279,12 @@ export const ModuleSchema = z.object({
   maxRisk: z.number().nullable(),
   viewedFiles: z.number(),
   summary: z.string().nullable(),
+  /** Review depth picked by the decision model from the user's depth rules (Settings → Review
+   * depth); null when no rules are configured, the repo isn't opted in, or no rule matched — the
+   * client then falls back to `defaultModuleLevel` (shared/levels.ts). */
+  recommendedLevel: DetailLevelSchema.nullable().default(null),
+  /** The `when` text of the rule that produced `recommendedLevel`, shown as its explanation. */
+  levelReason: z.string().nullable().default(null),
 });
 export type Module = z.infer<typeof ModuleSchema>;
 
@@ -353,6 +363,10 @@ export const AnalysisSchema = z.object({
   richDescriptionHtml: z.string().nullable(),
   visualOverviewHtml: z.string().nullable(),
   guidanceFiles: z.array(z.string()),
+  /** `depthRulesHash` of the rules `modules[].recommendedLevel` was computed from; null when
+   * never computed. The client re-runs `prr.depth.recompute` when it differs from the current
+   * settings' hash. */
+  depthRulesHash: z.string().nullable().default(null),
   /** Decision-model verdicts keyed by review thread id (unresolved threads only). */
   threadTriage: z
     .record(z.string(), z.object({ triage: ThreadTriageSchema, probability: z.number() }))

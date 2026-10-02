@@ -5,14 +5,32 @@
 // Markdown.tsx.
 
 export type HtmlNode =
-  | { type: "element"; tag: string; attrs: Record<string, string>; children: HtmlNode[] }
+  | {
+      type: "element";
+      tag: string;
+      attrs: Record<string, string>;
+      children: HtmlNode[];
+      /** Only populated for tags in `RAW_OUTER_HTML_TAGS` (currently just `svg`): the element's
+       * exact original markup, byte-for-byte, for callers (inline SVG → data URI) that need to
+       * pass it through unparsed rather than re-serialize the tree. */
+      raw?: string;
+    }
   | { type: "text"; text: string };
+
+export type HtmlElement = Extract<HtmlNode, { type: "element" }>;
 
 /** Elements that never take children, per the HTML spec (void elements). */
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "source", "meta", "link", "col", "wbr"]);
 
 /** Elements whose entire content (including nested-looking markup) is opaque and dropped. */
 const RAW_TEXT_TAGS = new Set(["script", "style"]);
+
+/** Elements that additionally get their exact original markup captured onto `raw` (see
+ * `HtmlNode`) once their matching close tag (or end of input) is found. Kept to a minimal,
+ * explicit allowlist — rather than capturing it for every element — so this stays cheap and so
+ * existing exact-shape assertions elsewhere (`toEqual` against a literal tree) aren't disturbed
+ * by a surprise extra field. */
+const RAW_OUTER_HTML_TAGS = new Set(["svg"]);
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -55,6 +73,10 @@ export function decodeEntities(text: string): string {
 interface Frame {
   tag: string | null; // null marks the synthetic root frame
   children: HtmlNode[];
+  /** Set only when `tag` is in `RAW_OUTER_HTML_TAGS`: the node to backfill with raw outer HTML,
+   * and the source index of its opening "<", once this frame closes (or input ends). */
+  node?: HtmlElement;
+  rawStart?: number;
 }
 
 const WHITESPACE_RE = /\s/;
@@ -143,6 +165,10 @@ export function parseHtmlFragment(html: string): HtmlNode[] {
         // Closes the matched frame (and implicitly any still-open descendants above it) — the
         // frame is changing, so finalize the pending text into it first.
         flushTextNode();
+        const frame = stack[foundIdx]!;
+        if (frame.node && frame.rawStart !== undefined) {
+          frame.node.raw = html.slice(frame.rawStart, i + match[0].length);
+        }
         stack.length = foundIdx;
       }
       // else: stray closing tag with no matching open ancestor — frame-neutral, ignored.
@@ -158,6 +184,7 @@ export function parseHtmlFragment(html: string): HtmlNode[] {
       continue;
     }
 
+    const tagStart = i; // position of this tag's "<", for RAW_OUTER_HTML_TAGS capture below
     pushTextRun(i);
     flushTextNode();
     const tagName = openMatch[1]!.toLowerCase();
@@ -224,14 +251,144 @@ export function parseHtmlFragment(html: string): HtmlNode[] {
       continue; // The whole element and its raw content are dropped — no node emitted.
     }
 
-    const node: HtmlNode = { type: "element", tag: tagName, attrs, children: [] };
+    const node: HtmlElement = { type: "element", tag: tagName, attrs, children: [] };
     stack[stack.length - 1]!.children.push(node);
+    const capturesRaw = RAW_OUTER_HTML_TAGS.has(tagName);
     if (!selfClosing && !VOID_TAGS.has(tagName)) {
-      stack.push({ tag: tagName, children: (node as { children: HtmlNode[] }).children });
+      const frame: Frame = { tag: tagName, children: node.children };
+      if (capturesRaw) {
+        frame.node = node;
+        frame.rawStart = tagStart;
+      }
+      stack.push(frame);
+    } else if (capturesRaw) {
+      // Self-closing (or void, though none of RAW_OUTER_HTML_TAGS are void): the tag itself is
+      // the whole element, so its raw outer HTML is just what was just scanned.
+      node.raw = html.slice(tagStart, i);
     }
   }
 
   pushTextRun(len);
   flushTextNode();
+  // Any still-open RAW_OUTER_HTML_TAGS frame (unterminated input) gets the rest of the string as
+  // its best-effort raw outer HTML, rather than leaving `raw` unset.
+  for (let s = stack.length - 1; s >= 1; s--) {
+    const frame = stack[s]!;
+    if (frame.node && frame.rawStart !== undefined) frame.node.raw = html.slice(frame.rawStart, len);
+  }
   return root.children;
+}
+
+// ---------- GitHub-bodyHTML mermaid detection/extraction (GithubHtmlView) ----------
+
+function textContent(nodes: HtmlNode[]): string {
+  return nodes.map((n) => (n.type === "text" ? n.text : textContent(n.children))).join("");
+}
+
+function hasClassToken(attrs: Record<string, string>, token: string): boolean {
+  return (attrs.class ?? "").split(/\s+/).includes(token);
+}
+
+/** `node` itself, else the first descendant (document order) matching `predicate`. */
+function findSelfOrDescendant(node: HtmlElement, predicate: (el: HtmlElement) => boolean): HtmlElement | null {
+  if (predicate(node)) return node;
+  for (const child of node.children) {
+    if (child.type !== "element") continue;
+    const found = findSelfOrDescendant(child, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Finds every mermaid diagram embedded in a GitHub `bodyHTML` document, in document order, and
+ * returns its source text. Matches GitHub's own markup (`section[data-type="mermaid"]`, source
+ * in a nested `[data-plain]` attribute, falling back to a nested `pre[lang="mermaid"]`'s text)
+ * as well as a plain `<pre lang="mermaid">` or `<pre><code class="language-mermaid">` with no
+ * wrapping section. Returns `[]` when there's nothing to render — the caller's signal not to
+ * bother loading the (~3 MB) mermaid runtime at all.
+ */
+export function findMermaidSources(html: string): string[] {
+  const sources: string[] = [];
+
+  function visit(nodes: HtmlNode[]): void {
+    for (const node of nodes) {
+      if (node.type !== "element") continue;
+      if (node.tag === "section" && node.attrs["data-type"] === "mermaid") {
+        const plainHolder = findSelfOrDescendant(node, (el) => "data-plain" in el.attrs);
+        if (plainHolder) {
+          sources.push(decodeEntities(plainHolder.attrs["data-plain"]!));
+        } else {
+          const pre = findSelfOrDescendant(node, (el) => el.tag === "pre");
+          if (pre) sources.push(decodeEntities(textContent(pre.children)));
+        }
+        continue; // don't also match this section's own nested pre[lang="mermaid"] below
+      }
+      if (node.tag === "pre") {
+        if (node.attrs.lang === "mermaid") {
+          sources.push(decodeEntities(textContent(node.children)));
+          continue;
+        }
+        const code = node.children.find(
+          (c): c is HtmlElement => c.type === "element" && c.tag === "code" && hasClassToken(c.attrs, "language-mermaid"),
+        );
+        if (code) {
+          sources.push(decodeEntities(textContent(code.children)));
+          continue;
+        }
+      }
+      visit(node.children);
+    }
+  }
+
+  visit(parseHtmlFragment(html));
+  return sources;
+}
+
+/** Cheap presence check for `class="mermaid"` (mermaid's own default marker class, which
+ * `mermaid.run()` auto-detects) anywhere in an HTML document — used by `HtmlView` to decide
+ * whether to load the runtime at all. */
+export function hasMermaidClass(html: string): boolean {
+  function visit(nodes: HtmlNode[]): boolean {
+    return nodes.some((node) => node.type === "element" && (hasClassToken(node.attrs, "mermaid") || visit(node.children)));
+  }
+  return visit(parseHtmlFragment(html));
+}
+
+// ---------- inline <video> (Markdown.tsx) ----------
+
+/** Resolves a `<video>` element's playable URL: its own `src`, else the first `<source src>`
+ * child's. Null when neither is present. */
+export function findVideoSrc(node: HtmlElement): string | null {
+  if (node.attrs.src) return node.attrs.src;
+  const source = node.children.find((c): c is HtmlElement => c.type === "element" && c.tag === "source" && Boolean(c.attrs.src));
+  return source ? source.attrs.src! : null;
+}
+
+// ---------- inline <svg> → data URI (Markdown.tsx) ----------
+
+/** Wraps raw SVG markup as a `data:` URI — script-free (an `<img>`/RN `Image` only ever decodes
+ * the image, never executes it) and avoids re-serializing the parsed tree, which SVG's
+ * stricter-than-HTML syntax (self-closing shape tags, `xmlns`, etc.) makes risky to get exactly
+ * right from a parsed-and-rebuilt tree rather than the original bytes. */
+export function svgDataUri(raw: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}`;
+}
+
+const VIEWBOX_RE = /^\s*-?[\d.]+\s+-?[\d.]+\s+([\d.]+)\s+([\d.]+)\s*$/;
+
+/** Intrinsic size for an `<svg>`, from its own `width`/`height` attributes when both are plain
+ * numbers, else derived from `viewBox`'s width/height. Null when neither is usable, leaving the
+ * caller to pick its own fallback size. */
+export function svgDimensions(attrs: Record<string, string>): { width: number; height: number } | null {
+  const width = Number(attrs.width);
+  const height = Number(attrs.height);
+  if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) return { width, height };
+  const viewBox = VIEWBOX_RE.exec(attrs.viewBox ?? "");
+  if (viewBox) {
+    const vbWidth = Number(viewBox[1]);
+    const vbHeight = Number(viewBox[2]);
+    if (vbWidth > 0 && vbHeight > 0) return { width: vbWidth, height: vbHeight };
+  }
+  return null;
 }
