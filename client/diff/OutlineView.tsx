@@ -2,14 +2,16 @@ import { Pressable, Text, View } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { OutlineChange, OutlineEntry } from "../../shared/types";
 import { Chip } from "../ui/chips";
+import { outlineSummary } from "./rows";
 
 type Theme = PluginSurfaceProps["theme"];
 type ThemeColors = Theme["colors"];
 
 const mono = { fontFamily: "monospace", fontSize: 11 } as const;
 
-/** Order entries are tallied in for `outlineSummary`; also doubles as the canonical change order. */
-const CHANGE_ORDER: OutlineChange[] = ["added", "removed", "signature", "modified", "renamed", "moved"];
+/** `rows.ts` is the single source for this (it's a pure module that other pure diff logic also
+ * needs); re-exported here so existing consumers of `OutlineView` keep working. */
+export { outlineSummary };
 
 function changeColor(change: OutlineChange, c: ThemeColors): string {
   switch (change) {
@@ -117,15 +119,4 @@ export function OutlineView({
       ))}
     </View>
   );
-}
-
-/** e.g. "2 added · 1 signature · 1 removed"; omits zero counts; "" when there are no entries. */
-export function outlineSummary(entries: OutlineEntry[]): string {
-  const counts: Record<OutlineChange, number> = { added: 0, removed: 0, modified: 0, signature: 0, renamed: 0, moved: 0 };
-  entries.forEach((entry) => {
-    counts[entry.change] += 1;
-  });
-  return CHANGE_ORDER.filter((change) => counts[change] > 0)
-    .map((change) => `${counts[change]} ${change}`)
-    .join(" · ");
 }

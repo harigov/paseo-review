@@ -1,4 +1,5 @@
 import type { AnalyzedFile, DiffLine, FileDiff, OutlineChange, OutlineEntry, Thread, ValidatorFinding, ViewedState } from "../../shared/types";
+import { gapsForFile, mergeContextLines, type ContextGap, type ContextGapPosition } from "./context";
 import { pairHunkLines } from "./pairing";
 
 // Pure row model for the continuous diff stream (client/review/ModuleTab.tsx). No React or
@@ -37,7 +38,7 @@ export type DiffQueryStatus = "idle" | "loading" | "error" | "success";
  * for module-scoped rows with no single owning file) and a stable `key` for FlatList. */
 export type Row =
   | { type: "fileHeader"; key: string; path: string; file: AnalyzedFile; expanded: boolean; viewed: ViewedState; outlineSummary: string }
-  | { type: "fileMeta"; key: string; path: string; file: AnalyzedFile; sinceViewedHighlighted: boolean }
+  | { type: "fileMeta"; key: string; path: string; file: AnalyzedFile; viewed: ViewedState; sinceViewedHighlighted: boolean }
   | { type: "outline"; key: string; path: string; entries: OutlineEntry[]; expanded: boolean; summary: string }
   | { type: "structural"; key: string; path: string }
   | { type: "truncated"; key: string; path: string }
@@ -54,10 +55,13 @@ export type Row =
       key: string;
       path: string;
       hunkIndex: number;
-      position: "above" | "below" | "between";
+      position: ContextGapPosition;
       oldStart: number;
       newStart: number;
+      /** Lines still unfetched in this gap (what pressing "Expand" would reveal next). */
       count: number;
+      /** Original full size of the gap, for the "Expand all" ≤ 500 rule (unaffected by partial fetches). */
+      totalCount: number;
     }
   | { type: "loading"; key: string; path: string }
   | { type: "error"; key: string; path: string; message: string; tone: "danger" | "muted" }
@@ -73,7 +77,7 @@ export interface StreamFileInput {
   viewed: ViewedState;
   mode: "text" | "structure";
   outlineExpanded: boolean;
-  /** Precomputed "N added · M signature …" summary (see OutlineView.outlineSummary). */
+  /** Precomputed "N added · M signature …" summary (see `outlineSummary` below). */
   outlineSummary: string;
   /** Whether this file's "changed since you viewed" chip has been expanded to show the diff. */
   sinceViewedHighlighted: boolean;
@@ -82,6 +86,11 @@ export interface StreamFileInput {
   diffErrorMessage?: string | null;
   /** Hunks the user expanded out of their collapsed (pure-move / whitespace-only) state. */
   expandedHunks: ReadonlySet<number>;
+  /** The file's total line count (new/head side), once fetched via a 1-line `prr.file.lines`
+   * probe; `null` when not yet known or not applicable (deleted files have no head content). */
+  totalLines: number | null;
+  /** Context lines fetched so far via `prr.file.lines`, keyed by new-side line number. */
+  contextLines: ReadonlyMap<number, string>;
   threads: Thread[];
   findings: FileDiffFinding[];
   drafts: DraftLike[];
@@ -98,12 +107,12 @@ export interface BuildStreamRowsInput {
   emptyReason?: "no_files" | "since_last_review";
 }
 
-const CHANGE_ORDER: OutlineChange[] = ["added", "removed", "signature", "modified", "renamed", "moved"];
+/** Order entries are tallied in for `outlineSummary`; also doubles as the canonical change order
+ * (`OutlineView.tsx` re-exports `outlineSummary` from here rather than keeping its own copy). */
+export const CHANGE_ORDER: OutlineChange[] = ["added", "removed", "signature", "modified", "renamed", "moved"];
 
-/** "2 added · 1 signature · 1 removed"; omits zero counts; "" when there are no entries.
- * Duplicated from `OutlineView.outlineSummary` (that module imports react-native, which this
- * pure module must not); keep the two in sync if the summary format ever changes. */
-export function summarizeOutline(entries: OutlineEntry[]): string {
+/** "2 added · 1 signature · 1 removed"; omits zero counts; "" when there are no entries. */
+export function outlineSummary(entries: OutlineEntry[]): string {
   const counts: Record<OutlineChange, number> = { added: 0, removed: 0, modified: 0, signature: 0, renamed: 0, moved: 0 };
   entries.forEach((entry) => {
     counts[entry.change] += 1;
@@ -199,7 +208,7 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
 
   if (!input.expanded) return rows;
 
-  rows.push({ type: "fileMeta", key: `meta:${path}`, path, file, sinceViewedHighlighted: input.sinceViewedHighlighted });
+  rows.push({ type: "fileMeta", key: `meta:${path}`, path, file, viewed: input.viewed, sinceViewedHighlighted: input.sinceViewedHighlighted });
 
   if (outline.length > 0) {
     rows.push({
@@ -236,39 +245,46 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
     rows.push({ type: "truncated", key: `truncated:${path}`, path });
   }
 
-  diff.hunks.forEach((hunk, hunkIndex) => {
-    // Expand-context placeholders (wave 2: these are inert — see DiffRows.tsx). "above" covers
-    // the gap before the first hunk; "between" covers gaps between consecutive hunks. "below"
-    // (after the last hunk) is left out: FileDiff doesn't carry the file's total line count, so
-    // there's no reliable count to show without an extra fetch (prr.file.lines), which is out
-    // of scope for this round.
-    if (hunkIndex === 0 && hunk.oldStart > 1) {
-      rows.push({
-        type: "expandContext",
-        key: `${path}:expand:above`,
-        path,
-        hunkIndex,
-        position: "above",
-        oldStart: 1,
-        newStart: 1,
-        count: hunk.oldStart - 1,
-      });
-    } else if (hunkIndex > 0) {
-      const prev = diff.hunks[hunkIndex - 1];
-      const prevOldEnd = prev.oldStart + prev.oldLines;
-      const gap = hunk.oldStart - prevOldEnd;
-      if (gap > 0) {
-        rows.push({
-          type: "expandContext",
-          key: `${path}:expand:between:${hunkIndex}`,
-          path,
-          hunkIndex,
-          position: "between",
-          oldStart: prevOldEnd,
-          newStart: prev.newStart + prev.newLines,
-          count: gap,
-        });
+  // Real context expansion (S2): `gaps` is the full extent of every above/between/below gap in
+  // this file (only "below" needs `input.totalLines`, and is omitted while that's unknown);
+  // `merged` is however much of each gap has actually been fetched so far, attached to the hunk
+  // it's adjacent to. Rows below interleave: (above only) a placeholder for whatever's still
+  // unfetched, nearest the top of the file → fetched context lines, nearest the hunk → the hunk
+  // itself → (last hunk only) fetched "below" context lines → a placeholder for whatever's left.
+  const gaps = gapsForFile(diff.hunks, input.totalLines);
+  const gapByKey = new Map<string, ContextGap>(gaps.map((gap) => [`${gap.position}:${gap.hunkIndex}`, gap]));
+  const merged = mergeContextLines(diff.hunks, input.contextLines);
+
+  function pushExpandRow(position: ContextGapPosition, hunkIndex: number, oldStart: number, newStart: number, count: number, totalCount: number): void {
+    rows.push({ type: "expandContext", key: `${path}:expand:${position}:${hunkIndex}`, path, hunkIndex, position, oldStart, newStart, count, totalCount });
+  }
+
+  function pushContextRun(hunkIndex: number, lines: DiffLine[], baseIndex: number): void {
+    lines.forEach((line, i) => {
+      const index = baseIndex + i;
+      if (split) {
+        rows.push({ type: "pair", key: `${path}:pair:${hunkIndex}:${index}:${index}`, path, hunkIndex, oldIndex: index, newIndex: index });
+      } else {
+        rows.push({ type: "line", key: `${path}:line:${hunkIndex}:${index}`, path, hunkIndex, lineIndex: index });
       }
+      placeAttachments(rows, path, line, line, input.threads, input.drafts, input.findings, composer);
+    });
+  }
+
+  diff.hunks.forEach((hunk, hunkIndex) => {
+    const isFirst = hunkIndex === 0;
+    const isLast = hunkIndex === diff.hunks.length - 1;
+    const { prepend, append } = merged[hunkIndex];
+
+    const gapBefore = gapByKey.get(`${isFirst ? "above" : "between"}:${hunkIndex}`);
+    const remainingBefore = gapBefore ? gapBefore.count - prepend.length : 0;
+
+    if (isFirst && gapBefore && remainingBefore > 0) {
+      pushExpandRow("above", hunkIndex, gapBefore.oldStart, gapBefore.newStart, remainingBefore, gapBefore.count);
+    }
+    pushContextRun(hunkIndex, prepend, 0);
+    if (!isFirst && gapBefore && remainingBefore > 0) {
+      pushExpandRow("between", hunkIndex, gapBefore.oldStart + prepend.length, gapBefore.newStart + prepend.length, remainingBefore, gapBefore.count);
     }
 
     const collapsible = hunk.pureMove || hunk.whitespaceOnly;
@@ -281,31 +297,42 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
         kind: hunk.pureMove ? "moved" : "whitespace",
         count: hunk.lines.length,
       });
-      return;
+    } else {
+      rows.push({
+        type: "hunkHeader",
+        key: `${path}:hunkHeader:${hunkIndex}`,
+        path,
+        hunkIndex,
+        context: hunkContext(hunk.header),
+        newStart: hunk.newStart,
+        newEnd: hunk.newLines > 0 ? hunk.newStart + hunk.newLines - 1 : hunk.newStart,
+      });
+
+      if (split) {
+        pairHunkLines(hunk.lines).forEach(({ oldIndex, newIndex }) => {
+          const adjOld = oldIndex !== null ? oldIndex + prepend.length : null;
+          const adjNew = newIndex !== null ? newIndex + prepend.length : null;
+          rows.push({ type: "pair", key: `${path}:pair:${hunkIndex}:${adjOld ?? "x"}:${adjNew ?? "x"}`, path, hunkIndex, oldIndex: adjOld, newIndex: adjNew });
+          const oldLine = oldIndex !== null ? hunk.lines[oldIndex] : null;
+          const newLine = newIndex !== null ? hunk.lines[newIndex] : null;
+          placeAttachments(rows, path, oldLine, newLine, input.threads, input.drafts, input.findings, composer);
+        });
+      } else {
+        hunk.lines.forEach((line, lineIndex) => {
+          const index = prepend.length + lineIndex;
+          rows.push({ type: "line", key: `${path}:line:${hunkIndex}:${index}`, path, hunkIndex, lineIndex: index });
+          placeAttachments(rows, path, line, line, input.threads, input.drafts, input.findings, composer);
+        });
+      }
     }
 
-    rows.push({
-      type: "hunkHeader",
-      key: `${path}:hunkHeader:${hunkIndex}`,
-      path,
-      hunkIndex,
-      context: hunkContext(hunk.header),
-      newStart: hunk.newStart,
-      newEnd: hunk.newLines > 0 ? hunk.newStart + hunk.newLines - 1 : hunk.newStart,
-    });
-
-    if (split) {
-      pairHunkLines(hunk.lines).forEach(({ oldIndex, newIndex }) => {
-        rows.push({ type: "pair", key: `${path}:pair:${hunkIndex}:${oldIndex ?? "x"}:${newIndex ?? "x"}`, path, hunkIndex, oldIndex, newIndex });
-        const oldLine = oldIndex !== null ? hunk.lines[oldIndex] : null;
-        const newLine = newIndex !== null ? hunk.lines[newIndex] : null;
-        placeAttachments(rows, path, oldLine, newLine, input.threads, input.drafts, input.findings, composer);
-      });
-    } else {
-      hunk.lines.forEach((line, lineIndex) => {
-        rows.push({ type: "line", key: `${path}:line:${hunkIndex}:${lineIndex}`, path, hunkIndex, lineIndex });
-        placeAttachments(rows, path, line, line, input.threads, input.drafts, input.findings, composer);
-      });
+    if (isLast) {
+      pushContextRun(hunkIndex, append, prepend.length + hunk.lines.length);
+      const gapAfter = gapByKey.get(`below:${hunkIndex}`);
+      const remainingAfter = gapAfter ? gapAfter.count - append.length : 0;
+      if (gapAfter && remainingAfter > 0) {
+        pushExpandRow("below", hunkIndex, gapAfter.oldStart + append.length, gapAfter.newStart + append.length, remainingAfter, gapAfter.count);
+      }
     }
   });
 
