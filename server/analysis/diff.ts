@@ -365,14 +365,23 @@ export function annotateMovesAndWhitespace(files: ParsedFile[]): void {
   }
 }
 
-export function toFileDiff(file: ParsedFile): FileDiff {
+export function toFileDiff(file: ParsedFile, totalLines: number | null = null): FileDiff {
   return {
     path: file.path,
     oldPath: file.oldPath,
     binary: file.binary,
     truncated: file.truncated,
     hunks: file.hunks,
+    totalLines,
   };
+}
+
+/** Line count of file content as git shows it (a trailing newline does not start an extra line). */
+export function countLines(content: string): number {
+  if (content === "") return 0;
+  const lines = content.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.length;
 }
 
 /** Parses numstat output (`additions\tdeletions\tpath` or rename `old => new`). */

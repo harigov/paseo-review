@@ -3,13 +3,14 @@ import { pollJob, startJob } from "../core/jobs";
 import { handle } from "../core/handle";
 import { services } from "../core/services";
 import type { AnalysisService, ValidationUnit } from "../core/services";
-import { fileDiffRpc, fileMoveRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
-import type { Analysis, FileDiff } from "../../shared/types";
-import { annotateMovesAndWhitespace, parseUnifiedDiff, toFileDiff } from "./diff";
+import { FILE_LINES_MAX, fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
+import type { Analysis, FileDiff, PrDetail, StructuralDiff } from "../../shared/types";
+import { annotateMovesAndWhitespace, countLines, parseUnifiedDiff, toFileDiff } from "./diff";
 import { ensureMirror, fetchPrRefs, fetchSha, grepAtRef, mergeBase as computeMergeBase, objectExists, rawDiff, showFile } from "./git";
 import { resolveRepo, resolvePrRefs } from "./core";
 import { runAnalysisPipeline } from "./pipeline";
-import { loadAnalysis, saveAnalysis, saveOverride } from "./store";
+import { ANALYSIS_VERSION, loadAnalysis, saveAnalysis, saveOverride } from "./store";
+import { computeStructuralDiff, structuralKindFor } from "./structural";
 import { buildLocalUnits, buildPrUnits } from "./units";
 import { getLocalViewedRecords } from "../github/viewed-store";
 
@@ -21,11 +22,40 @@ import { getLocalViewedRecords } from "../github/viewed-store";
  * different-cased calls for the same repo fragment into different cache files (and a
  * genuinely malformed string reaches `repoDataFile` with no owner/name to report).
  */
+/** Small LRU for per-file structural diffs: deterministic per (merge base, head, path), and the
+ * YAML parse of a big lockfile is the slow part of that RPC. */
+const STRUCTURAL_CACHE_MAX = 200;
+const structuralCache = new Map<string, StructuralDiff>();
+function cacheStructural(key: string, value: StructuralDiff): StructuralDiff {
+  structuralCache.delete(key);
+  structuralCache.set(key, value);
+  if (structuralCache.size > STRUCTURAL_CACHE_MAX) {
+    const oldest = structuralCache.keys().next().value;
+    if (oldest !== undefined) structuralCache.delete(oldest);
+  }
+  return value;
+}
+
 async function canonicalSlug(repo: string): Promise<string> {
   try {
     return (await resolveRepo(repo)).slug;
   } catch {
     return repo;
+  }
+}
+
+/**
+ * A8: per-file RPCs run inside a 30s-capped RPC, not a job — never do an unbounded network
+ * fetch there. If the head is already mirrored (the common case: an analysis job already ran),
+ * skip the network entirely. If not, try a short, bounded fetch; if that still doesn't get us
+ * the head, fail with a clear, actionable error instead of hanging the RPC.
+ */
+async function ensureHeadMirrored(mirror: string, detail: PrDetail, number: number): Promise<void> {
+  const headSha = detail.summary.headSha;
+  if (await objectExists(mirror, headSha)) return;
+  await fetchPrRefs(mirror, number, detail.summary.baseRef, 20_000);
+  if (!(await objectExists(mirror, headSha))) {
+    throw new Error(`PR #${number}'s head commit isn't mirrored locally yet. Re-run analysis, then try again.`);
   }
 }
 
@@ -44,7 +74,10 @@ export function createAnalysisService(): AnalysisService {
     async getAnalysis(repo, number): Promise<Analysis | null> {
       const slug = await canonicalSlug(repo);
       const analysis = loadAnalysis(slug, number);
-      if (!analysis) return null;
+      // An analysis from an older pipeline version lacks newer per-file data; report "none" so
+      // the PR screen kicks off a fresh run (the pipeline itself still reads the old cache to
+      // carry agent artifacts over).
+      if (!analysis || analysis.version !== ANALYSIS_VERSION) return null;
       // X2: re-apply current validator enabled/dismissed state on every read, so toggling or
       // dismissing a validator shows up immediately without waiting for the next full re-run.
       const withValidatorState = { ...analysis, validators: services.validators.applyState(slug, number, analysis.validators) };
@@ -88,17 +121,7 @@ export function createAnalysisService(): AnalysisService {
       const detail = await services.github.getPr(repo, number);
       const mirror = await ensureMirror(repoObj);
       const headSha = detail.summary.headSha;
-
-      // A8: this runs inside a 30s-capped RPC, not a job — never do an unbounded network fetch
-      // here. If the head is already mirrored (the common case: an analysis job already ran),
-      // skip the network entirely. If not, try a short, bounded fetch; if that still doesn't
-      // get us the head, fail with a clear, actionable error instead of hanging the RPC.
-      if (!(await objectExists(mirror, headSha))) {
-        await fetchPrRefs(mirror, number, detail.summary.baseRef, 20_000);
-        if (!(await objectExists(mirror, headSha))) {
-          throw new Error(`PR #${number}'s head commit isn't mirrored locally yet. Re-run analysis, then try again.`);
-        }
-      }
+      await ensureHeadMirrored(mirror, detail, number);
       const mergeBaseSha = await computeMergeBase(mirror, detail.baseSha, headSha, detail.summary.baseRef);
 
       let fromRef = mergeBaseSha;
@@ -122,8 +145,57 @@ export function createAnalysisService(): AnalysisService {
       const parsed = parseUnifiedDiff(raw);
       annotateMovesAndWhitespace(parsed);
       const file = parsed.find((f) => f.path === filePath);
-      if (!file) return { path: filePath, oldPath: null, binary: false, truncated: false, hunks: [] };
-      return toFileDiff(file);
+      if (!file) return { path: filePath, oldPath: null, binary: false, truncated: false, hunks: [], totalLines: null };
+      // Head-side line count so the client can offer context below the last hunk without a probe.
+      let totalLines: number | null = null;
+      if (!file.binary && file.status !== "deleted") {
+        const head = await showFile(mirror, headSha, filePath);
+        totalLines = head === null ? null : countLines(head);
+      }
+      return toFileDiff(file, totalLines);
+    },
+
+    async getStructuralDiff(repo, number, filePath): Promise<StructuralDiff | null> {
+      const kind = structuralKindFor(filePath);
+      if (!kind) return null;
+      const repoObj = await resolveRepo(repo);
+      const detail = await services.github.getPr(repo, number);
+      const mirror = await ensureMirror(repoObj);
+      const headSha = detail.summary.headSha;
+      await ensureHeadMirrored(mirror, detail, number);
+      const mergeBaseSha = await computeMergeBase(mirror, detail.baseSha, headSha, detail.summary.baseRef);
+      const cacheKey = `${repoObj.slug.toLowerCase()}#${number}:${mergeBaseSha}:${headSha}:${filePath}`;
+      const cached = structuralCache.get(cacheKey);
+      if (cached) return cached;
+      // A renamed file's base-side content lives at its old path.
+      const analyzed = loadAnalysis(repoObj.slug, number)?.files.find((f) => f.path === filePath) ?? null;
+      const oldPath = analyzed?.oldPath ?? filePath;
+      const oldText = analyzed?.status === "added" ? null : await showFile(mirror, mergeBaseSha, oldPath);
+      const newText = analyzed?.status === "deleted" ? null : await showFile(mirror, headSha, filePath);
+      return cacheStructural(cacheKey, computeStructuralDiff(filePath, kind, oldText, newText));
+    },
+
+    async getFileLines(repo, number, filePath, side, start, end) {
+      if (end < start) throw new Error("Invalid line range.");
+      if (end - start + 1 > FILE_LINES_MAX) throw new Error(`At most ${FILE_LINES_MAX} lines per request.`);
+      const repoObj = await resolveRepo(repo);
+      const detail = await services.github.getPr(repo, number);
+      const mirror = await ensureMirror(repoObj);
+      const headSha = detail.summary.headSha;
+      await ensureHeadMirrored(mirror, detail, number);
+      let ref = headSha;
+      let path = filePath;
+      if (side === "base") {
+        ref = await computeMergeBase(mirror, detail.baseSha, headSha, detail.summary.baseRef);
+        const analyzed = loadAnalysis(repoObj.slug, number)?.files.find((f) => f.path === filePath) ?? null;
+        path = analyzed?.oldPath ?? filePath;
+      }
+      const content = await showFile(mirror, ref, path);
+      if (content === null) return { lines: [], totalLines: 0 };
+      const all = content.split("\n");
+      // A trailing newline yields one empty final element that isn't a real line.
+      if (all.length && all[all.length - 1] === "") all.pop();
+      return { lines: all.slice(start - 1, end), totalLines: all.length };
     },
 
     async getRawDiff(repo, number, filePath) {
@@ -194,6 +266,15 @@ export function registerAnalysisHandlers(server: PluginServerContext): void {
 
   handle(server, fileDiffRpc, async ({ repo, number, path, scope }) => {
     return services.analysis.getFileDiff(repo, number, path, scope);
+  });
+
+  handle(server, fileLinesRpc, async ({ repo, number, path, side, start, end }) => {
+    return services.analysis.getFileLines(repo, number, path, side, start, end);
+  });
+
+  handle(server, fileStructuralDiffRpc, async ({ repo, number, path }) => {
+    const diff = await services.analysis.getStructuralDiff(repo, number, path);
+    return { diff };
   });
 
   handle(server, fileMoveRpc, async ({ repo, number, path, moduleId }) => {

@@ -15,7 +15,8 @@ export const RepoSchema = z.object({
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
-export const InboxSectionSchema = z.enum(["mine", "review_requested", "assigned", "all"]);
+/** "recent" = PRs the viewer reviewed (any state), newest activity first; the rest are open PRs. */
+export const InboxSectionSchema = z.enum(["recent", "mine", "review_requested", "assigned", "all"]);
 export type InboxSection = z.infer<typeof InboxSectionSchema>;
 
 export const ChecksStateSchema = z.enum(["success", "failure", "pending", "none"]);
@@ -57,6 +58,8 @@ export const ThreadCommentSchema = z.object({
   id: z.string(),
   author: z.string(),
   body: z.string(),
+  /** GitHub-rendered HTML of `body` (mentions, emoji, task lists resolved); "" when unavailable. */
+  bodyHtml: z.string(),
   createdAt: z.string(),
   url: z.string(),
 });
@@ -91,9 +94,40 @@ export const PrFileSchema = z.object({
 });
 export type PrFile = z.infer<typeof PrFileSchema>;
 
+export const ReviewStateSchema = z.enum(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"]);
+export type ReviewState = z.infer<typeof ReviewStateSchema>;
+
+/** Latest review per reviewer (humans and bots), from GitHub's `latestReviews`. */
+export const PrReviewSchema = z.object({
+  author: z.string(),
+  authorKind: z.enum(["user", "bot"]),
+  state: ReviewStateSchema,
+  submittedAt: z.string().nullable(),
+  url: z.string().nullable(),
+});
+export type PrReview = z.infer<typeof PrReviewSchema>;
+
+/** A reviewer whose review is still requested (no review submitted yet). */
+export const ReviewRequestSchema = z.object({
+  name: z.string(),
+  kind: z.enum(["user", "team", "bot"]),
+});
+export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+export const PrCheckSchema = z.object({
+  name: z.string(),
+  state: ChecksStateSchema,
+  url: z.string().nullable(),
+  /** GitHub App that owns the check run (e.g. "GitHub Actions"); null for legacy commit statuses. */
+  app: z.string().nullable(),
+});
+export type PrCheck = z.infer<typeof PrCheckSchema>;
+
 export const PrDetailSchema = z.object({
   summary: PrSummarySchema,
   body: z.string(),
+  /** GitHub-rendered HTML of the description; "" when unavailable. */
+  bodyHtml: z.string(),
   nodeId: z.string(),
   baseSha: z.string(),
   commits: z.number(),
@@ -102,9 +136,97 @@ export const PrDetailSchema = z.object({
   myLastReviewSha: z.string().nullable(),
   files: z.array(PrFileSchema),
   threads: z.array(ThreadSchema),
-  checks: z.array(z.object({ name: z.string(), state: ChecksStateSchema, url: z.string().nullable() })),
+  checks: z.array(PrCheckSchema),
+  /** Latest review per reviewer, humans and bots alike. */
+  reviews: z.array(PrReviewSchema),
+  /** Outstanding review requests. */
+  reviewRequests: z.array(ReviewRequestSchema),
 });
 export type PrDetail = z.infer<typeof PrDetailSchema>;
+
+// ---------- Outline diff (declaration-level) ----------
+
+export const OutlineKindSchema = z.enum([
+  "function",
+  "method",
+  "class",
+  "interface",
+  "type",
+  "enum",
+  "struct",
+  "trait",
+  "impl",
+  "module",
+  "constant",
+  "variable",
+  "other",
+]);
+export type OutlineKind = z.infer<typeof OutlineKindSchema>;
+
+/**
+ * added / removed: the declaration exists on one side only.
+ * modified: same name and signature, body differs.
+ * signature: the declaration header differs (parameters, return type, modifiers).
+ * renamed: same body, different name, same file.
+ * moved: same body, different file (reported in both the source and destination file).
+ */
+export const OutlineChangeSchema = z.enum(["added", "removed", "modified", "signature", "renamed", "moved"]);
+export type OutlineChange = z.infer<typeof OutlineChangeSchema>;
+
+export const OutlineEntrySchema = z.object({
+  /** Qualified name, e.g. "UserService.create" or "parse". */
+  name: z.string(),
+  kind: OutlineKindSchema,
+  change: OutlineChangeSchema,
+  /** Exported / public per the language's convention. */
+  exported: z.boolean(),
+  /** One-line declaration header at head (or at base when removed). */
+  signature: z.string(),
+  /** Base-side header when `change` is "signature". */
+  oldSignature: z.string().nullable(),
+  /** 1-based line range in the head file; null when removed. */
+  newStart: z.number().nullable(),
+  newEnd: z.number().nullable(),
+  /** 1-based line range in the base file; null when added. */
+  oldStart: z.number().nullable(),
+  oldEnd: z.number().nullable(),
+  /** Added + deleted lines that fall inside this declaration's range. */
+  changedLines: z.number(),
+  /** For renamed / moved: where the other half lives. */
+  counterpart: z.object({ path: z.string(), name: z.string() }).nullable(),
+});
+export type OutlineEntry = z.infer<typeof OutlineEntrySchema>;
+
+// ---------- Structural diff (tables for lockfiles, JSON, YAML) ----------
+
+export const StructuralKindSchema = z.enum(["lockfile", "json", "yaml"]);
+export type StructuralKind = z.infer<typeof StructuralKindSchema>;
+
+export const StructuralEntrySchema = z.object({
+  /** Key path ("dependencies.react", "jobs.build.steps[2].run") or the package name for lockfiles. */
+  path: z.string(),
+  change: z.enum(["added", "removed", "changed"]),
+  /** Rendered scalar values; containers are summarised ("{3 keys}", "[5 items]"). */
+  oldValue: z.string().nullable(),
+  newValue: z.string().nullable(),
+  /** 1-based lines for jump-to; null when not on that side or unknown. */
+  oldLine: z.number().nullable(),
+  newLine: z.number().nullable(),
+});
+export type StructuralEntry = z.infer<typeof StructuralEntrySchema>;
+
+export const StructuralDiffSchema = z.object({
+  path: z.string(),
+  kind: StructuralKindSchema,
+  /** Lockfile flavour ("npm", "yarn", "pnpm", "cargo", "poetry", "go", "bundler", "composer", "pipenv"); null for json/yaml. */
+  format: z.string().nullable(),
+  entries: z.array(StructuralEntrySchema),
+  /** Entries were capped. */
+  truncated: z.boolean(),
+  /** Parse failure on either side (entries empty); the client falls back to the text diff. */
+  error: z.string().nullable(),
+});
+export type StructuralDiff = z.infer<typeof StructuralDiffSchema>;
 
 // ---------- Analysis ----------
 
@@ -134,6 +256,10 @@ export const AnalyzedFileSchema = z.object({
   rebaseOnly: z.boolean(),
   /** Positions in each reading order (0-based, global across modules). */
   order: z.object({ foundations: z.number(), risk: z.number(), chrono: z.number() }),
+  /** Declaration-level changes; null when the language is unsupported, the file is binary, or it is too large. */
+  outline: z.array(OutlineEntrySchema).nullable().default(null),
+  /** Non-null when the file can also be shown as a structural (table) diff. */
+  structuralKind: StructuralKindSchema.nullable().default(null),
 });
 export type AnalyzedFile = z.infer<typeof AnalyzedFileSchema>;
 
@@ -198,6 +324,8 @@ export type ValidatorResult = z.infer<typeof ValidatorResultSchema>;
 export const AnalysisSchema = z.object({
   repo: z.string(),
   number: z.number(),
+  /** Schema/pipeline version that produced this analysis (see ANALYSIS_VERSION in server/analysis/store.ts). */
+  version: z.number().default(0),
   headSha: z.string(),
   baseSha: z.string(),
   mergeBaseSha: z.string(),
@@ -263,6 +391,8 @@ export const FileDiffSchema = z.object({
   binary: z.boolean(),
   truncated: z.boolean(),
   hunks: z.array(HunkSchema),
+  /** Line count of the head-side file (for context expansion below the last hunk); null when deleted, binary or unknown. */
+  totalLines: z.number().nullable(),
 });
 export type FileDiff = z.infer<typeof FileDiffSchema>;
 
@@ -292,3 +422,7 @@ export type AgentChoice = z.infer<typeof AgentChoiceSchema>;
 
 export const ReadingOrderSchema = z.enum(["foundations", "risk", "chrono"]);
 export type ReadingOrder = z.infer<typeof ReadingOrderSchema>;
+
+/** How file diffs are rendered: one column (inline) or old/new side by side (split). */
+export const DiffLayoutSchema = z.enum(["inline", "split"]);
+export type DiffLayout = z.infer<typeof DiffLayoutSchema>;

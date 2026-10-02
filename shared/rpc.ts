@@ -8,10 +8,12 @@ import {
   PrDetailSchema,
   PrSummarySchema,
   RepoSchema,
+  StructuralDiffSchema,
   ValidatorResultSchema,
   ValidatorSchema,
   ViewedStateSchema,
 } from "./types";
+import { UiStateSchema } from "./ui-state";
 
 // Every RPC finishes well under the daemon's 30 s cap. Long work starts a job and is polled.
 
@@ -69,6 +71,31 @@ export const threadReplyRpc = defineRpc({
   output: Ok,
 });
 
+/** Posts a single review comment immediately (not part of a pending review). */
+export const commentCreateRpc = defineRpc({
+  name: "prr.comment.create",
+  input: PrRef.extend({
+    path: z.string(),
+    line: z.number(),
+    side: z.enum(["LEFT", "RIGHT"]),
+    body: z.string(),
+    commitSha: z.string(),
+  }),
+  output: z.object({ id: z.string(), url: z.string().nullable() }),
+});
+
+export const commentUpdateRpc = defineRpc({
+  name: "prr.comment.update",
+  input: PrRef.extend({ commentId: z.string(), body: z.string() }),
+  output: Ok,
+});
+
+export const commentDeleteRpc = defineRpc({
+  name: "prr.comment.delete",
+  input: PrRef.extend({ commentId: z.string() }),
+  output: Ok,
+});
+
 
 // ---------- analysis (server/analysis) ----------
 
@@ -97,6 +124,29 @@ export const fileDiffRpc = defineRpc({
     scope: z.enum(["full", "since_viewed", "since_last_review"]),
   }),
   output: FileDiffSchema,
+});
+
+/** Maximum lines one `prr.file.lines` call returns; shared by the server cap and the client's "Expand all". */
+export const FILE_LINES_MAX = 500;
+
+/** Lines of a file at the PR head or merge base, for expanding context around a hunk. */
+export const fileLinesRpc = defineRpc({
+  name: "prr.file.lines",
+  input: PrRef.extend({
+    path: z.string(),
+    side: z.enum(["base", "head"]),
+    /** 1-based inclusive range; at most FILE_LINES_MAX lines per call. */
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+  }),
+  output: z.object({ lines: z.array(z.string()), totalLines: z.number() }),
+});
+
+export const fileStructuralDiffRpc = defineRpc({
+  name: "prr.file.structural",
+  input: PrRef.extend({ path: z.string() }),
+  /** `diff` is null when the file isn't eligible for a structural view (see AnalyzedFile.structuralKind). */
+  output: z.object({ diff: StructuralDiffSchema.nullable() }),
 });
 
 export const fileMoveRpc = defineRpc({
@@ -181,6 +231,20 @@ export const chatStartRpc = defineRpc({
   input: PrRef.extend({ seed: z.string().optional(), agentChoiceId: z.string().optional() }),
   /** Job result: ChatStartResult. Creating the PR worktree can exceed the 30 s RPC cap. */
   output: z.object({ jobId: z.string() }),
+});
+
+// ---------- UI state (server/ui-state) ----------
+
+export const uiStateGetRpc = defineRpc({
+  name: "prr.ui.get",
+  input: z.object({}),
+  output: z.object({ state: UiStateSchema }),
+});
+
+export const uiStateSetRpc = defineRpc({
+  name: "prr.ui.set",
+  input: z.object({ state: UiStateSchema }),
+  output: Ok,
 });
 
 export const precomputeStatusRpc = defineRpc({

@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { DiffLayoutSchema } from "./types";
 
 export const DecisionProviderSchema = z.enum(["openrouter", "cloudflare", "jev", "custom"]);
 
@@ -55,6 +56,10 @@ export const PrReviewSettingsSchema = z.object({
       maxFiles: 1500,
     }),
   readingOrder: z.enum(["foundations", "risk", "chrono"]).default("foundations"),
+  /** Default diff layout for file diffs; the PR screen has a per-session toggle. */
+  diffLayout: DiffLayoutSchema.default("inline"),
+  /** Code size / row height in the diff viewer. */
+  diffDensity: z.enum(["comfortable", "compact"]).default("comfortable"),
 });
 
 export type PrReviewSettings = z.infer<typeof PrReviewSettingsSchema>;

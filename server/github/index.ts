@@ -16,8 +16,11 @@ import type {
   InboxSection,
   PrDetail,
   PrFile,
+  PrReview,
   PrSummary,
   Repo,
+  ReviewRequest,
+  ReviewState,
   Thread,
   ViewedState,
 } from "../../shared/types";
@@ -62,6 +65,75 @@ function mapCheckRunState(status: string | null | undefined, conclusion: string 
 function mapReviewDecision(decision: string | null | undefined): ReviewDecisionValue {
   if (decision === "APPROVED" || decision === "CHANGES_REQUESTED" || decision === "REVIEW_REQUIRED") return decision;
   return "NONE";
+}
+
+function mapReviewState(state: string | null | undefined): ReviewState {
+  if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED" || state === "PENDING") {
+    return state;
+  }
+  return "COMMENTED";
+}
+
+/** Group rank for sorting `PrDetail.reviews`: changes-requested, then approved, then everything
+ * else (commented/dismissed/pending share a group, newest first within it). */
+const REVIEW_STATE_RANK: Record<ReviewState, number> = {
+  CHANGES_REQUESTED: 0,
+  APPROVED: 1,
+  COMMENTED: 2,
+  DISMISSED: 2,
+  PENDING: 2,
+};
+
+interface LatestReviewNode {
+  state: string | null;
+  submittedAt: string | null;
+  url: string | null;
+  author: { __typename: string; login: string } | null;
+}
+
+/** Maps GitHub's `latestReviews` nodes (one per reviewer) to `PrDetail.reviews`: excludes the PR
+ * author's own review and sorts changes-requested first, then approved, then the rest — newest
+ * submission first within each group. */
+export function mapLatestReviews(nodes: LatestReviewNode[], prAuthor: string): PrReview[] {
+  const reviews = nodes
+    .filter((n) => (n.author?.login ?? "ghost") !== prAuthor)
+    .map((n) => ({
+      author: n.author?.login ?? "ghost",
+      authorKind: (n.author?.__typename === "Bot" ? "bot" : "user") as PrReview["authorKind"],
+      state: mapReviewState(n.state),
+      submittedAt: n.submittedAt ?? null,
+      url: n.url ?? null,
+    }));
+  return reviews.sort((a, b) => {
+    const byRank = REVIEW_STATE_RANK[a.state] - REVIEW_STATE_RANK[b.state];
+    if (byRank !== 0) return byRank;
+    const at = a.submittedAt ? Date.parse(a.submittedAt) : 0;
+    const bt = b.submittedAt ? Date.parse(b.submittedAt) : 0;
+    return bt - at;
+  });
+}
+
+interface ReviewRequestNode {
+  requestedReviewer: { __typename: string; login?: string; name?: string; slug?: string } | null;
+}
+
+/** Maps GitHub's `reviewRequests` nodes to `PrDetail.reviewRequests`. Mannequins (unclaimed
+ * reviewer placeholders) are reported as users; teams prefer `slug`, falling back to `name`. */
+export function mapReviewRequests(nodes: ReviewRequestNode[]): ReviewRequest[] {
+  const out: ReviewRequest[] = [];
+  for (const node of nodes) {
+    const reviewer = node.requestedReviewer;
+    if (!reviewer) continue;
+    if (reviewer.__typename === "Team") {
+      out.push({ kind: "team", name: reviewer.slug || reviewer.name || "" });
+    } else if (reviewer.__typename === "Bot") {
+      out.push({ kind: "bot", name: reviewer.login ?? "" });
+    } else {
+      // User or Mannequin
+      out.push({ kind: "user", name: reviewer.login ?? "" });
+    }
+  }
+  return out;
 }
 
 /** Small bounded cache: evicts the least-recently-written entry once `maxSize` is exceeded, so
@@ -186,7 +258,7 @@ async function findRepo(slug: string): Promise<Repo | null> {
 /** Validates that `slug` is one of the repos registered as a Paseo project (the plan's stated
  * scope) and returns its canonical form. Every github RPC handler must call this before using
  * the caller-supplied repo string for a GraphQL call, a `gh` invocation, or a data-file path. */
-async function requireRepo(slug: string): Promise<Repo> {
+export async function requireRepo(slug: string): Promise<Repo> {
   const repo = await findRepo(slug);
   if (!repo) throw new Error(`"${slug}" is not a repo registered as a Paseo project.`);
   return repo;
@@ -259,7 +331,8 @@ const PR_SEARCH_FRAGMENT = `
 `;
 
 const INBOX_QUERY = `
-  query($qMine: String!, $qReview: String!, $qAssigned: String!, $qAll: String!) {
+  query($qMine: String!, $qReview: String!, $qAssigned: String!, $qAll: String!, $qRecent: String!) {
+    recent: search(type: ISSUE, first: 20, query: $qRecent) { nodes { ... on PullRequest { ...prFields } } }
     mine: search(type: ISSUE, first: 50, query: $qMine) { nodes { ... on PullRequest { ...prFields } } }
     reviewRequested: search(type: ISSUE, first: 50, query: $qReview) { nodes { ... on PullRequest { ...prFields } } }
     assigned: search(type: ISSUE, first: 50, query: $qAssigned) { nodes { ... on PullRequest { ...prFields } } }
@@ -324,7 +397,8 @@ async function fillInboxEnrichment(prs: PrSummary[], repos: Repo[]): Promise<voi
       }
     }),
   );
-  const eligible = prs.filter((pr) => decisionsEnabled.get(pr.repo.toLowerCase()));
+  // Merged/closed PRs (from the "recent" search) need no attention score.
+  const eligible = prs.filter((pr) => pr.state === "OPEN" && decisionsEnabled.get(pr.repo.toLowerCase()));
   if (eligible.length) await fillAttention(eligible);
 }
 
@@ -350,6 +424,8 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
 
   const repoFilter = repos.map((r) => `repo:${r.slug}`).join(" ");
   const sections: Record<InboxSection, string> = {
+    // Any state: a PR you reviewed last week and that merged since still belongs under "recent".
+    recent: `is:pr reviewed-by:@me -author:@me ${repoFilter} sort:updated-desc`,
     mine: `is:pr is:open author:@me ${repoFilter}`,
     review_requested: `is:pr is:open review-requested:@me ${repoFilter}`,
     assigned: `is:pr is:open assignee:@me ${repoFilter}`,
@@ -359,6 +435,7 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
   const merged = new Map<string, PrSummary>();
   try {
     const data = await graphqlWithVars<{
+      recent: { nodes: SearchPrNode[] };
       mine: { nodes: SearchPrNode[] };
       reviewRequested: { nodes: SearchPrNode[] };
       assigned: { nodes: SearchPrNode[] };
@@ -368,9 +445,11 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue> {
       qReview: sections.review_requested,
       qAssigned: sections.assigned,
       qAll: sections.all,
+      qRecent: sections.recent,
     });
 
     const bySection: Array<[InboxSection, SearchPrNode[]]> = [
+      ["recent", data.recent?.nodes ?? []],
       ["mine", data.mine?.nodes ?? []],
       ["review_requested", data.reviewRequested?.nodes ?? []],
       ["assigned", data.assigned?.nodes ?? []],
@@ -413,6 +492,7 @@ interface CheckRunContext {
   conclusion: string | null;
   status: string | null;
   url: string | null;
+  checkSuite: { app: { name: string } | null } | null;
 }
 interface StatusContextEntry {
   __typename: "StatusContext";
@@ -430,6 +510,7 @@ interface CommentNode {
   id: string;
   author: { login: string } | null;
   body: string;
+  bodyHTML: string | null;
   createdAt: string;
   url: string;
 }
@@ -464,6 +545,7 @@ interface PrQueryResult {
   headRefOid: string;
   baseRefOid: string;
   body: string | null;
+  bodyHTML: string | null;
   labels: { nodes: Array<{ name: string }> } | null;
   commits: {
     totalCount: number;
@@ -474,12 +556,16 @@ interface PrQueryResult {
     nodes: Array<{ path: string; additions: number; deletions: number; changeType: string; viewerViewedState: string }>;
   };
   reviewThreads: { pageInfo: PageInfo; nodes: ThreadNode[] };
-  reviews: { nodes: Array<{ submittedAt: string | null; author: { login: string } | null; commit: { oid: string } | null }> };
+  /** This viewer's latest matching review only — aliased from `reviews` to avoid clashing with
+   * `latestReviews` below (used for `myLastReviewSha`, not `PrDetail.reviews`). */
+  myReviews: { nodes: Array<{ submittedAt: string | null; author: { login: string } | null; commit: { oid: string } | null }> };
+  latestReviews: { nodes: LatestReviewNode[] };
+  reviewRequests: { nodes: ReviewRequestNode[] };
 }
 
 const THREAD_FIELDS = `
   id isResolved isOutdated path line originalLine diffSide
-  comments(first: 50) { pageInfo { hasNextPage endCursor } nodes { id author { login } body createdAt url } }
+  comments(first: 50) { pageInfo { hasNextPage endCursor } nodes { id author { login } body bodyHTML createdAt url } }
 `;
 
 /** Full PR fetch: core fields plus the first page each of files and review threads. */
@@ -493,6 +579,7 @@ function buildPrCoreQuery(owner: string, name: string, number: number, viewerLog
           createdAt updatedAt additions deletions changedFiles reviewDecision
           baseRefName headRefName headRefOid baseRefOid
           body
+          bodyHTML
           labels(first: 10) { nodes { name } }
           commits(last: 1) {
             totalCount
@@ -503,7 +590,7 @@ function buildPrCoreQuery(owner: string, name: string, number: number, viewerLog
                   contexts(first: 50) {
                     nodes {
                       __typename
-                      ... on CheckRun { name conclusion status url }
+                      ... on CheckRun { name conclusion status url checkSuite { app { name } } }
                       ... on StatusContext { context state targetUrl }
                     }
                   }
@@ -519,8 +606,22 @@ function buildPrCoreQuery(owner: string, name: string, number: number, viewerLog
             pageInfo { hasNextPage endCursor }
             nodes { ${THREAD_FIELDS} }
           }
-          reviews(last: 1, author: ${gqlString(viewerLogin)}, states: [APPROVED, CHANGES_REQUESTED, COMMENTED]) {
+          myReviews: reviews(last: 1, author: ${gqlString(viewerLogin)}, states: [APPROVED, CHANGES_REQUESTED, COMMENTED]) {
             nodes { submittedAt author { login } commit { oid } }
+          }
+          latestReviews(first: 100) {
+            nodes { state submittedAt url author { __typename login } }
+          }
+          reviewRequests(first: 50) {
+            nodes {
+              requestedReviewer {
+                __typename
+                ... on User { login }
+                ... on Team { name slug }
+                ... on Bot { login }
+                ... on Mannequin { login }
+              }
+            }
           }
         }
       }
@@ -568,7 +669,7 @@ function buildThreadCommentsPageQuery(threadId: string, after: string): string {
         ... on PullRequestReviewThread {
           comments(first: 50, after: ${gqlString(after)}) {
             pageInfo { hasNextPage endCursor }
-            nodes { id author { login } body createdAt url }
+            nodes { id author { login } body bodyHTML createdAt url }
           }
         }
       }
@@ -637,6 +738,7 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
       id: c.id,
       author: c.author?.login ?? "ghost",
       body: c.body ?? "",
+      bodyHtml: c.bodyHTML ?? "",
       createdAt: c.createdAt,
       url: c.url,
     })),
@@ -655,14 +757,19 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   const contexts = basePr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
   const checks = contexts.map((c) => {
     if (c.__typename === "CheckRun") {
-      return { name: c.name, state: mapCheckRunState(c.status, c.conclusion), url: c.url ?? null };
+      return { name: c.name, state: mapCheckRunState(c.status, c.conclusion), url: c.url ?? null, app: c.checkSuite?.app?.name ?? null };
     }
-    return { name: c.context, state: mapSearchChecks(c.state), url: c.targetUrl ?? null };
+    return { name: c.context, state: mapSearchChecks(c.state), url: c.targetUrl ?? null, app: null };
   });
 
-  // `reviews` is already filtered server-side to this viewer's latest matching review (X8), so
-  // this is correct even on busy PRs where the viewer's review is far from the most recent one.
-  const myLastReviewSha = basePr.reviews?.nodes?.[0]?.commit?.oid ?? null;
+  // `myReviews` (aliased `reviews`) is already filtered server-side to this viewer's latest
+  // matching review (X8), so this is correct even on busy PRs where the viewer's review is far
+  // from the most recent one.
+  const myLastReviewSha = basePr.myReviews?.nodes?.[0]?.commit?.oid ?? null;
+
+  const prAuthor = basePr.author?.login ?? "ghost";
+  const reviews = mapLatestReviews(basePr.latestReviews?.nodes ?? [], prAuthor);
+  const reviewRequests = mapReviewRequests(basePr.reviewRequests?.nodes ?? []);
 
   const unresolvedThreads = threads.filter((t) => !t.isResolved).length;
   const summary: PrSummary = {
@@ -696,6 +803,7 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
   return {
     summary,
     body: basePr.body ?? "",
+    bodyHtml: basePr.bodyHTML ?? "",
     nodeId: basePr.id,
     baseSha: basePr.baseRefOid,
     commits: basePr.commits?.totalCount ?? 0,
@@ -704,6 +812,8 @@ async function fetchPrDetail(repo: string, number: number): Promise<PrDetail> {
     files: mappedFiles,
     threads,
     checks,
+    reviews,
+    reviewRequests,
   };
 }
 
@@ -721,7 +831,7 @@ async function getPr(repo: string, number: number, refresh?: boolean): Promise<P
   return detail;
 }
 
-function invalidatePr(repo: string, number: number): void {
+export function invalidatePr(repo: string, number: number): void {
   prCache.delete(`${repo.toLowerCase()}#${number}`);
 }
 

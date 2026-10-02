@@ -4,7 +4,9 @@ import { Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-
 import { useRpc } from "@getpaseo/plugin/client";
 import { reviewSubmitRpc } from "../../shared/rpc";
 import type { PrTabContext } from "../pr/tab-props";
-import { clearDrafts, dropStaleDrafts, removeDraft, useDrafts } from "./drafts";
+import { clearDrafts, dropStaleDrafts, removeDraft, updateDraft, useDrafts } from "./drafts";
+import { markPrReviewed } from "../app/ui-state";
+import { font, radius, space, surfaces, weight } from "../ui/tokens";
 
 const EVENTS = [
   { event: "APPROVE" as const, label: "Approve" },
@@ -13,15 +15,20 @@ const EVENTS = [
 ];
 
 export function ReviewSubmitButton(props: PrTabContext) {
-  const { repo, number, theme, refresh, reanalyze, analysis } = props;
+  const { repo, number, theme, refresh, reanalyze, analysis, detail } = props;
   const c = theme.colors;
-  const headSha = analysis?.headSha ?? "";
+  const s = surfaces(c);
+  // Prefer the live PR head: the diffs (and so the drafts' line numbers) come from it, and the
+  // analysis can lag behind for a while after a push.
+  const headSha = detail?.summary.headSha ?? analysis?.headSha ?? "";
   const drafts = useDrafts(repo, number, headSha);
   const rpc = useRpc(reviewSubmitRpc);
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [body, setBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editBody, setEditBody] = useState("");
 
   async function submit(event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT") {
     setSubmitting(true);
@@ -34,6 +41,7 @@ export function ReviewSubmitButton(props: PrTabContext) {
         comments: drafts.map((draft) => ({ path: draft.path, line: draft.line, side: draft.side, body: draft.body })),
       });
       toast.show("Review submitted");
+      markPrReviewed(repo, number);
       clearDrafts(repo, number, headSha);
       setBody("");
       setOpen(false);
@@ -58,39 +66,87 @@ export function ReviewSubmitButton(props: PrTabContext) {
     setOpen(true);
   }
 
+  function startEditDraft(index: number) {
+    setEditingIndex(index);
+    setEditBody(drafts[index]?.body ?? "");
+  }
+
+  function saveEditDraft(index: number) {
+    const body = editBody.trim();
+    if (!body) {
+      toast.error("A comment can't be empty.");
+      return;
+    }
+    updateDraft(repo, number, headSha, index, body);
+    setEditingIndex(null);
+    setEditBody("");
+  }
+
+  function cancelEditDraft() {
+    setEditingIndex(null);
+    setEditBody("");
+  }
+
+  const canComment = body.trim().length > 0 || drafts.length > 0;
+
   return (
     <>
       <Pressable
         accessibilityRole="button"
         onPress={openReviewModal}
-        style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: c.accent, borderRadius: 6 }}
+        style={{ ...s.button, flexDirection: "row", alignItems: "center", gap: space.xs }}
       >
         <Icon name="GitPullRequest" size={13} color={c.accentForeground} />
-        <Text style={{ color: c.accentForeground, fontSize: 12 }}>Review ({drafts.length} drafts)</Text>
+        <Text style={s.buttonText}>Review ({drafts.length} drafts)</Text>
       </Pressable>
       <Modal title="Submit review" open={open} onOpenChange={setOpen}>
         <Modal.Content>
-          <View style={{ gap: 10 }}>
-            <View style={{ gap: 6 }}>
+          <View style={{ gap: space.md }}>
+            <View style={{ gap: space.sm }}>
               {drafts.length === 0 ? (
-                <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>No draft comments yet.</Text>
+                <Text style={{ ...font.small, color: c.foregroundMuted }}>No draft comments yet.</Text>
               ) : (
-                drafts.map((draft, index) => (
-                  <View
-                    key={`${draft.path}-${draft.line}-${index}`}
-                    style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8 }}
-                  >
-                    <View style={{ flex: 1, gap: 2 }}>
-                      <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                        {draft.path}:{draft.line}
-                      </Text>
-                      <Text style={{ color: c.foreground, fontSize: 12 }}>{draft.body}</Text>
+                drafts.map((draft, index) => {
+                  const editing = editingIndex === index;
+                  return (
+                    <View key={draft.id} style={{ ...s.raised, flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
+                      <View style={{ flex: 1, gap: space.xs }}>
+                        <Text style={{ ...font.small, color: c.foregroundMuted }}>
+                          {draft.path}:{draft.line}
+                        </Text>
+                        <View style={s.hairline} />
+                        {editing ? (
+                          <>
+                            <TextInput
+                              value={editBody}
+                              onChangeText={setEditBody}
+                              multiline
+                              style={{ ...s.input, minHeight: 60 }}
+                            />
+                            <View style={{ flexDirection: "row", gap: space.md }}>
+                              <Pressable accessibilityRole="button" onPress={cancelEditDraft}>
+                                <Text style={{ ...font.small, color: c.foregroundMuted }}>Cancel</Text>
+                              </Pressable>
+                              <Pressable accessibilityRole="button" onPress={() => saveEditDraft(index)}>
+                                <Text style={{ ...font.small, color: c.accent }}>Save</Text>
+                              </Pressable>
+                            </View>
+                          </>
+                        ) : (
+                          <>
+                            <Text style={{ ...font.body, color: c.foreground }}>{draft.body}</Text>
+                            <Pressable accessibilityRole="button" onPress={() => startEditDraft(index)}>
+                              <Text style={{ ...font.small, color: c.accent }}>Edit</Text>
+                            </Pressable>
+                          </>
+                        )}
+                      </View>
+                      <Pressable accessibilityRole="button" onPress={() => removeDraft(repo, number, headSha, index)}>
+                        <Icon name="X" size={14} color={c.foregroundMuted} />
+                      </Pressable>
                     </View>
-                    <Pressable accessibilityRole="button" onPress={() => removeDraft(repo, number, headSha, index)}>
-                      <Icon name="X" size={14} color={c.foregroundMuted} />
-                    </Pressable>
-                  </View>
-                ))
+                  );
+                })
               )}
             </View>
             <TextInput
@@ -98,25 +154,31 @@ export function ReviewSubmitButton(props: PrTabContext) {
               onChangeText={setBody}
               placeholder="Overall review comment (optional)…"
               multiline
-              style={{ minHeight: 70, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8, fontSize: 13 }}
+              style={{ ...s.input, minHeight: 70 }}
             />
-            <View style={{ flexDirection: "row", gap: 8, justifyContent: "flex-end" }}>
-              {EVENTS.map(({ event, label }) => (
-                <Pressable
-                  key={event}
-                  accessibilityRole="button"
-                  disabled={submitting}
-                  onPress={() => submit(event)}
-                  style={{
-                    paddingVertical: 6,
-                    paddingHorizontal: 12,
-                    borderRadius: 6,
-                    backgroundColor: event === "APPROVE" ? c.statusSuccess : event === "REQUEST_CHANGES" ? c.statusDanger : c.surface2,
-                  }}
-                >
-                  <Text style={{ color: event === "COMMENT" ? c.foreground : c.accentForeground, fontSize: 12 }}>{label}</Text>
-                </Pressable>
-              ))}
+            <View style={{ flexDirection: "row", gap: space.sm, justifyContent: "flex-end" }}>
+              {EVENTS.map(({ event, label }) => {
+                const disabled = submitting || (event === "COMMENT" && !canComment);
+                return (
+                  <Pressable
+                    key={event}
+                    accessibilityRole="button"
+                    disabled={disabled}
+                    onPress={() => submit(event)}
+                    style={{
+                      paddingVertical: 7,
+                      paddingHorizontal: space.md,
+                      borderRadius: radius.md,
+                      backgroundColor: event === "APPROVE" ? c.statusSuccess : event === "REQUEST_CHANGES" ? c.statusDanger : c.surface2,
+                      opacity: disabled ? 0.5 : 1,
+                    }}
+                  >
+                    <Text style={{ ...font.small, fontWeight: weight.semibold, color: event === "COMMENT" ? c.foreground : c.accentForeground }}>
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
           </View>
         </Modal.Content>

@@ -2,13 +2,20 @@ import { useSyncExternalStore } from "react";
 
 /** A draft review comment, kept client-side until the review is submitted. */
 export interface DraftComment {
+  /** Stable id (incrementing counter) so UI rows can key on it even as the list is edited. */
+  id: number;
   path: string;
   line: number;
   side: "LEFT" | "RIGHT";
   body: string;
 }
 
+/** Shape of a new draft before `addDraft` stamps it with a stable id. */
+export type NewDraftComment = Omit<DraftComment, "id">;
+
 type Key = string;
+
+let nextDraftId = 1;
 
 // Keyed by head SHA too: a draft's `line`/`side` only makes sense against the diff it was
 // written against. If the PR is force-pushed or rebased, line numbers can shift — keying by
@@ -30,10 +37,12 @@ function emit(key: Key): void {
   set.forEach((listener) => listener());
 }
 
-export function addDraft(repo: string, number: number, headSha: string, draft: DraftComment): void {
+export function addDraft(repo: string, number: number, headSha: string, draft: NewDraftComment): DraftComment {
   const key = keyOf(repo, number, headSha);
-  store.set(key, [...(store.get(key) ?? []), draft]);
+  const withId: DraftComment = { ...draft, id: nextDraftId++ };
+  store.set(key, [...(store.get(key) ?? []), withId]);
   emit(key);
+  return withId;
 }
 
 export function removeDraft(repo: string, number: number, headSha: string, index: number): void {
@@ -41,6 +50,16 @@ export function removeDraft(repo: string, number: number, headSha: string, index
   store.set(
     key,
     (store.get(key) ?? []).filter((_draft, position) => position !== index),
+  );
+  emit(key);
+}
+
+/** Updates a draft's body in place (e.g. from the review-submit modal or the diff composer). */
+export function updateDraft(repo: string, number: number, headSha: string, index: number, body: string): void {
+  const key = keyOf(repo, number, headSha);
+  store.set(
+    key,
+    (store.get(key) ?? []).map((draft, position) => (position === index ? { ...draft, body } : draft)),
   );
   emit(key);
 }
@@ -88,3 +107,4 @@ export function useDrafts(repo: string, number: number, headSha: string): DraftC
     () => store.get(key) ?? EMPTY,
   );
 }
+

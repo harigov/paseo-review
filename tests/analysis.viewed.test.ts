@@ -65,6 +65,7 @@ function detailWith(anchor: string | null): PrDetail {
       changedSinceMyReview: null,
     },
     body: "",
+    bodyHtml: "",
     nodeId: "node1",
     baseSha,
     commits: 1,
@@ -73,6 +74,8 @@ function detailWith(anchor: string | null): PrDetail {
     files: [{ path: "src/a.ts", additions: 1, deletions: 0, changeType: "modified", viewed: "UNVIEWED" }],
     threads: [],
     checks: [],
+    reviews: [],
+    reviewRequests: [],
   };
 }
 

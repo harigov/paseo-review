@@ -1,12 +1,14 @@
 import type { JobUpdate } from "../core/jobs";
 import { services } from "../core/services";
-import type { Analysis, AnalyzedFile, Module, ThreadTriage } from "../../shared/types";
+import type { Analysis, AnalyzedFile, Module, OutlineEntry, ThreadTriage } from "../../shared/types";
 import { extractRichHtml } from "../../shared/rich-html";
 import { annotateMovesAndWhitespace, parseUnifiedDiff, type ParsedFile } from "./diff";
 import { ensureMirror, fetchPrRefs, mergeBase as computeMergeBase, rawDiff, showFile } from "./git";
 import { classifyHeuristic, DEFAULT_MODULES, loadRepoOverride, parseGitAttributes, resolveTaxonomy, type HeuristicResult, type ModuleDef } from "./modules";
 import { buildImportGraph, computeChronoOrder, computeFoundationsOrder, computeRiskOrder, toPositionMap } from "./order";
-import { loadAnalysis, loadOverrides, saveAnalysis } from "./store";
+import { computeOutlines } from "./outline";
+import { ANALYSIS_VERSION, loadAnalysis, loadOverrides, saveAnalysis } from "./store";
+import { structuralKindFor } from "./structural";
 import { buildUnitsFromGathered } from "./units";
 import { computeViewedFields } from "./viewed";
 import { resolveRepo } from "./core";
@@ -50,7 +52,7 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
   const baseRef = detail.summary.baseRef;
 
   const existing = loadAnalysis(repo.slug, number);
-  if (!force && existing && existing.headSha === headSha) return existing;
+  if (!force && existing && existing.headSha === headSha && existing.version === ANALYSIS_VERSION) return existing;
 
   const mirror = await ensureMirror(repo);
   await fetchPrRefs(mirror, number, baseRef);
@@ -63,6 +65,15 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
   const raw = await rawDiff(mirror, mergeBaseSha, headSha);
   const parsedFiles: ParsedFile[] = parseUnifiedDiff(raw);
   annotateMovesAndWhitespace(parsedFiles);
+
+  // Declaration-level outline per file. Best-effort: a failure here must not sink the analysis.
+  update.stage("outline", 0.22);
+  let outlines = new Map<string, OutlineEntry[] | null>();
+  try {
+    outlines = await computeOutlines(parsedFiles, (side, path) => showFile(mirror, side === "base" ? mergeBaseSha : headSha, path));
+  } catch (error) {
+    console.error("[pr-review] outline stage failed:", error);
+  }
 
   update.stage("modules", 0.3);
   let taxonomy: ModuleDef[] = DEFAULT_MODULES;
@@ -269,6 +280,8 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
         risk: riskPos.get(f.path) ?? 0,
         chrono: chronoPos.get(f.path) ?? 0,
       },
+      outline: outlines.get(f.path) ?? null,
+      structuralKind: f.binary ? null : structuralKindFor(f.path),
     };
   });
 
@@ -305,6 +318,7 @@ export async function runAnalysisPipeline(repoSlug: string, number: number, forc
   const analysis: Analysis = {
     repo: repoSlug,
     number,
+    version: ANALYSIS_VERSION,
     headSha,
     baseSha,
     mergeBaseSha,

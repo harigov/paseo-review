@@ -4,6 +4,7 @@ import type {
   PrDetail,
   PrSummary,
   Repo,
+  StructuralDiff,
   Thread,
   ThreadTriage,
   Validator,
@@ -61,6 +62,10 @@ export interface AnalysisService {
     path: string,
     scope: "full" | "since_viewed" | "since_last_review",
   ): Promise<FileDiff>;
+  /** Table-style diff for lockfiles / JSON / YAML (merge-base..head); null when the path isn't eligible. */
+  getStructuralDiff(repo: string, number: number, path: string): Promise<StructuralDiff | null>;
+  /** Lines `start..end` (1-based, inclusive, ≤ 500) of `path` at the head ("head") or merge base ("base"). */
+  getFileLines(repo: string, number: number, path: string, side: "base" | "head", start: number, end: number): Promise<{ lines: string[]; totalLines: number }>;
   /** Raw unified diff (merge-base..head), optionally for one path. Used by agent tools. */
   getRawDiff(repo: string, number: number, path?: string): Promise<string>;
   readFileAtRef(repo: string, ref: string, path: string): Promise<string | null>;
