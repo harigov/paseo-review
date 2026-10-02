@@ -4,8 +4,8 @@ import {
   fileSegments,
   formatHunkHeader,
   hunkContext,
+  outlineSummary,
   stickyIndices,
-  summarizeOutline,
   type BuildStreamRowsInput,
   type ComposerTarget,
   type DraftLike,
@@ -73,12 +73,14 @@ function baseFileInput(partial: Partial<StreamFileInput> & { file: AnalyzedFile 
     viewed: partial.file.viewed,
     mode: "text",
     outlineExpanded: false,
-    outlineSummary: summarizeOutline(partial.file.outline ?? []),
+    outlineSummary: outlineSummary(partial.file.outline ?? []),
     sinceViewedHighlighted: false,
     diffStatus: "success",
     diff: null,
     diffErrorMessage: null,
     expandedHunks: new Set(),
+    totalLines: null,
+    contextLines: new Map(),
     threads: [],
     findings: [],
     drafts: [],
@@ -304,6 +306,79 @@ describe("expand-context placeholders", () => {
     });
     expect(rows.some((r) => r.type === "expandContext")).toBe(false);
   });
+
+  it("emits no 'below' placeholder when totalLines is unknown", () => {
+    const h = hunk({ lines: [ctx(1, 1)], oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: null })],
+    });
+    expect(rows.some((r) => r.type === "expandContext" && r.position === "below")).toBe(false);
+  });
+
+  it("emits a 'below' placeholder once totalLines is known, after the last hunk's lines", () => {
+    const h = hunk({ lines: [ctx(1, 1)], oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), totalLines: 25 })],
+    });
+    const lastLineIndex = rows.findIndex((r) => r.type === "line");
+    const below = rows.find((r) => r.type === "expandContext" && r.position === "below");
+    expect(below).toMatchObject({ position: "below", oldStart: 2, newStart: 2, count: 24, totalCount: 24 });
+    expect(rows.indexOf(below!)).toBeGreaterThan(lastLineIndex);
+  });
+
+  it("interleaves already-fetched context lines around a hunk, shrinking the remaining placeholder", () => {
+    const h = hunk({ lines: [ctx(20, 20)], oldStart: 20, oldLines: 1, newStart: 20, newLines: 1 });
+    // "above" gap is lines 1-19; only the 5 nearest the hunk (15-19) have been fetched.
+    const fetched = new Map(Array.from({ length: 5 }, (_, i) => [15 + i, `fetched ${15 + i}`] as const));
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [
+        baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h] }), contextLines: fetched }),
+      ],
+    });
+    const placeholder = rows.find((r) => r.type === "expandContext");
+    expect(placeholder).toMatchObject({ position: "above", count: 14, totalCount: 19 });
+    const placeholderIndex = rows.indexOf(placeholder!);
+    const fetchedLineRows = rows.filter((r) => r.type === "line" && r.lineIndex < 5);
+    expect(fetchedLineRows).toHaveLength(5);
+    // The still-unfetched remainder (nearest the top of the file) comes before the fetched lines
+    // (nearest the hunk), which come before the hunk's own header.
+    const hunkHeaderIndex = rows.findIndex((r) => r.type === "hunkHeader");
+    expect(placeholderIndex).toBeLessThan(rows.indexOf(fetchedLineRows[0]));
+    expect(rows.indexOf(fetchedLineRows[4])).toBeLessThan(hunkHeaderIndex);
+  });
+
+  it("handles a pure-insertion hunk's 'between' gap without an off-by-one", () => {
+    // @@ -5,0 +6,2 @@ followed by @@ -8,1 +10,1 @@ — the gap covers old lines 6-7 (count 2),
+    // not old 5-7: old line 5 is the insertion's anchor, not part of the following gap.
+    const h1 = hunk({ lines: [ctx(100, 100)], oldStart: 5, oldLines: 0, newStart: 6, newLines: 2 });
+    const h2 = hunk({ lines: [ctx(200, 200)], oldStart: 8, oldLines: 1, newStart: 10, newLines: 1 });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file: analyzedFile({ path: "a.ts" }), expanded: true, diff: fileDiff({ path: "a.ts", hunks: [h1, h2] }) })],
+    });
+    const between = rows.find((r) => r.type === "expandContext" && r.position === "between");
+    expect(between).toMatchObject({ position: "between", oldStart: 6, newStart: 8, count: 2, totalCount: 2 });
+  });
+});
+
+describe("fileMeta uses the resolved viewed state, not the raw file flag", () => {
+  it("reflects an optimistic viewed override rather than the stale analysis value", () => {
+    const file = analyzedFile({ path: "a.ts", viewed: "DISMISSED" });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, expanded: true, viewed: "VIEWED" })],
+    });
+    const meta = rows.find((r) => r.type === "fileMeta");
+    expect(meta).toMatchObject({ viewed: "VIEWED" });
+  });
 });
 
 describe("loading / error / empty / structural / outline rows", () => {
@@ -381,7 +456,7 @@ describe("loading / error / empty / structural / outline rows", () => {
           file,
           expanded: true,
           diff: fileDiff({ path: "a.ts", hunks: [] }),
-          outlineSummary: summarizeOutline(entries),
+          outlineSummary: outlineSummary(entries),
         }),
       ],
     });

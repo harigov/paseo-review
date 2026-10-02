@@ -9,6 +9,8 @@ import { Chip, riskColor } from "../ui/chips";
 import { EmptyState, ErrorState, Skeleton } from "../ui/states";
 import { code as codeByDensity, font, radius, space, surfaces, withAlpha, type DiffDensity } from "../ui/tokens";
 import { Markdown } from "../render/Markdown";
+import type { ContextGapPosition } from "./context";
+import { applySpansToTokens, type Span } from "./intraline";
 import { OutlineView } from "./OutlineView";
 import { StructuralDiffView } from "./StructuralDiffView";
 import { InlineComposer } from "./InlineComposer";
@@ -33,9 +35,21 @@ export interface StreamRowContext {
 
   getHunk(path: string, hunkIndex: number): Hunk | undefined;
   getTokens(path: string, hunkIndex: number): HighlightToken[][];
+  /** Word-level emphasis spans per line, parallel to `getTokens`; `null` for a line that isn't
+   * part of a matched del/add pair, is whitespace-only, or changed too much to be worth it. */
+  getIntraline(path: string, hunkIndex: number): Array<Span[] | null>;
   getDraft(path: string, draftId: number): DraftComment | undefined;
 
+  /** Row index of the keyboard line cursor, or `null`; drawn with a 2px accent left border. */
+  cursorIndex: number | null;
+  /** The file currently under keyboard control (from `j`/`k` or scroll tracking); its header
+   * gets the same 2px accent left border as the cursor row. */
+  currentPath: string | null;
+
   onToggleViewed(file: AnalyzedFile): void;
+  /** "Viewed & next": marks `file` viewed, collapses it, and expands + scrolls to the next
+   * not-fully-viewed file in reading order — same flow as the `v` keyboard shortcut. */
+  onMarkViewedAndNext(file: AnalyzedFile): void;
   onToggleExpand(path: string): void;
   onOpenMove(path: string): void;
   onToggleOutline(path: string): void;
@@ -45,13 +59,22 @@ export interface StreamRowContext {
   viewModeOf(path: string): "text" | "structure";
 
   onExpandHunk(path: string, hunkIndex: number): void;
+  /** Keys of `expandContext` gaps currently being fetched (`${path}:${position}:${hunkIndex}`). */
+  contextPending: ReadonlySet<string>;
+  onExpandContext(path: string, position: ContextGapPosition, hunkIndex: number, mode: "press" | "all"): void;
 
   hoverKey: string | null;
   onHoverGutter(key: string | null): void;
+  /** Called on hover-out with the key the pressable itself owns; the caller only clears
+   * `hoverKey` when it still matches, so a late hover-out from a previous row can't stomp a
+   * newer hover-in that already landed on a different row. */
+  onHoverGutterOut(key: string): void;
   /** Whole-row hover highlight (web), distinct from the "+" gutter's own hover state so hovering
    * the gutter doesn't clear the row's highlight. */
   hoveredRowKey: string | null;
   onHoverRow(key: string | null): void;
+  /** Same late-event guard as `onHoverGutterOut`, for the whole-row hover highlight. */
+  onHoverRowOut(key: string): void;
   onOpenComposer(path: string, side: Side, line: number): void;
 
   isReplyOpen(threadId: string): boolean;
@@ -70,6 +93,9 @@ export interface StreamRowContext {
   composerBody: string;
   onChangeComposerBody(text: string): void;
   composerBusy: boolean;
+  /** Only true on the render where this composer target was just opened — see `InlineComposer`'s
+   * `autoFocus` doc comment for why a virtualized cell can't just hardcode it. */
+  composerAutoFocus: boolean;
   onCancelComposer(): void;
   onAddToReview(): void;
   onCommentNow(): void;
@@ -110,7 +136,7 @@ function renderAddGutter(ctx: StreamRowContext, gutterKey: string, target: { sid
       disabled={!target}
       onPress={() => target && ctx.onOpenComposer(path, target.side, target.number)}
       onHoverIn={() => target && ctx.onHoverGutter(gutterKey)}
-      onHoverOut={() => ctx.onHoverGutter(null)}
+      onHoverOut={() => ctx.onHoverGutterOut(gutterKey)}
       style={{ width: 18, alignItems: "center", justifyContent: "center" }}
     >
       <Text style={{ fontSize: 13, lineHeight, color: hovered ? c.accent : c.foregroundMuted, opacity: target ? (hovered ? 1 : 0.35) : 0 }}>+</Text>
@@ -118,12 +144,41 @@ function renderAddGutter(ctx: StreamRowContext, gutterKey: string, target: { sid
   );
 }
 
-function renderLineContent(line: DiffLine, tokens: HighlightToken[], ctx: StreamRowContext, codeText: ReturnType<typeof codeTextStyle>): ReactElement | null {
+/** Stronger tint behind intra-line (word-level) emphasis, layered over the row's own 0.18 tint. */
+const INTRALINE_ALPHA = 0.32;
+
+function renderLineContent(
+  line: DiffLine,
+  tokens: HighlightToken[],
+  spans: Span[] | null,
+  ctx: StreamRowContext,
+  codeText: ReturnType<typeof codeTextStyle>,
+): ReactElement | null {
   const c = ctx.theme.colors;
   if (line.whitespaceOnly) {
     return (
       <Text selectable style={{ ...codeText, flex: 1, paddingRight: 12, color: c.foregroundMuted, opacity: 0.6 }} numberOfLines={1}>
         {markWhitespace(line.text)}
+      </Text>
+    );
+  }
+  if (spans && spans.length > 0) {
+    const emphasisColor = line.kind === "del" ? c.statusDanger : line.kind === "add" ? c.statusSuccess : null;
+    const baseTokens: HighlightToken[] = tokens.length > 0 ? tokens : [{ text: expandTabs(line.text) || " ", style: null }];
+    const pieces = applySpansToTokens(baseTokens, spans);
+    return (
+      <Text selectable style={{ ...codeText, flex: 1, paddingRight: 12 }} numberOfLines={1}>
+        {pieces.map((piece, i) => (
+          <Text
+            key={i}
+            style={{
+              color: piece.style ? ctx.palette[piece.style] : c.foreground,
+              backgroundColor: piece.emphasized && emphasisColor ? withAlpha(emphasisColor, INTRALINE_ALPHA) : undefined,
+            }}
+          >
+            {piece.text}
+          </Text>
+        ))}
       </Text>
     );
   }
@@ -141,23 +196,32 @@ function renderLineContent(line: DiffLine, tokens: HighlightToken[], ctx: Stream
   );
 }
 
-function renderLineRow(row: Extract<Row, { type: "line" }>, ctx: StreamRowContext): ReactElement | null {
+function renderLineRow(row: Extract<Row, { type: "line" }>, index: number, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const hunk = ctx.getHunk(row.path, row.hunkIndex);
   if (!hunk) return null;
   const line = hunk.lines[row.lineIndex];
   const tokens = ctx.getTokens(row.path, row.hunkIndex)[row.lineIndex] ?? [];
+  const spans = ctx.getIntraline(row.path, row.hunkIndex)[row.lineIndex] ?? null;
   const code = codeByDensity[ctx.density];
   const codeText = codeTextStyle(code);
   const bg = line.kind === "add" ? c.statusSuccess : line.kind === "del" ? c.statusDanger : null;
   const target = lineTarget(line);
   const rowKey = `row-line-${row.path}-${row.hunkIndex}-${row.lineIndex}`;
   const hovered = ctx.hoveredRowKey === rowKey;
+  const isCursor = ctx.cursorIndex === index;
   return (
     <Pressable
       onHoverIn={() => ctx.onHoverRow(rowKey)}
-      onHoverOut={() => ctx.onHoverRow(null)}
-      style={{ flexDirection: "row", minHeight: code.lineHeight, opacity: line.moved ? 0.55 : 1, backgroundColor: hovered ? c.surface1 : undefined }}
+      onHoverOut={() => ctx.onHoverRowOut(rowKey)}
+      style={{
+        flexDirection: "row",
+        minHeight: code.lineHeight,
+        opacity: line.moved ? 0.55 : 1,
+        backgroundColor: hovered ? c.surface1 : undefined,
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
     >
       {bg ? <View pointerEvents="none" style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: withAlpha(bg, 0.18) }} /> : null}
       {renderAddGutter(ctx, `line-${row.path}-${row.hunkIndex}-${row.lineIndex}`, target, row.path, code.lineHeight)}
@@ -167,7 +231,7 @@ function renderLineRow(row: Extract<Row, { type: "line" }>, ctx: StreamRowContex
       </Pressable>
       <Text style={{ ...code, width: 16, color: bg ?? c.foregroundMuted }}>{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</Text>
       {line.moved ? <Text style={{ ...code, width: 28, color: c.accent, fontSize: 10 }}>↔ moved</Text> : null}
-      {renderLineContent(line, tokens, ctx, codeText)}
+      {renderLineContent(line, tokens, spans, ctx, codeText)}
     </Pressable>
   );
 }
@@ -180,6 +244,7 @@ function renderPairCell(path: string, hunkIndex: number, index: number | null, s
   }
   const line = hunk.lines[index];
   const tokens = ctx.getTokens(path, hunkIndex)[index] ?? [];
+  const spans = ctx.getIntraline(path, hunkIndex)[index] ?? null;
   const codeText = codeTextStyle(code);
   const tinted = side === "old" ? line.kind === "del" : line.kind === "add";
   const bg = tinted ? (side === "old" ? c.statusDanger : c.statusSuccess) : null;
@@ -195,23 +260,30 @@ function renderPairCell(path: string, hunkIndex: number, index: number | null, s
       </Pressable>
       <Text style={{ ...code, width: 16, color: bg ?? c.foregroundMuted }}>{marker}</Text>
       {line.moved ? <Text style={{ ...code, width: 28, color: c.accent, fontSize: 10 }}>↔ moved</Text> : null}
-      {renderLineContent(line, tokens, ctx, codeText)}
+      {renderLineContent(line, tokens, spans, ctx, codeText)}
     </View>
   );
 }
 
-function renderPairRow(row: Extract<Row, { type: "pair" }>, ctx: StreamRowContext): ReactElement | null {
+function renderPairRow(row: Extract<Row, { type: "pair" }>, index: number, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const hunk = ctx.getHunk(row.path, row.hunkIndex);
   if (!hunk) return null;
   const code = codeByDensity[ctx.density];
   const rowKey = `row-pair-${row.path}-${row.hunkIndex}-${row.oldIndex ?? "x"}-${row.newIndex ?? "x"}`;
   const hovered = ctx.hoveredRowKey === rowKey;
+  const isCursor = ctx.cursorIndex === index;
   return (
     <Pressable
       onHoverIn={() => ctx.onHoverRow(rowKey)}
-      onHoverOut={() => ctx.onHoverRow(null)}
-      style={{ flexDirection: "row", minHeight: code.lineHeight, backgroundColor: hovered ? c.surface1 : undefined }}
+      onHoverOut={() => ctx.onHoverRowOut(rowKey)}
+      style={{
+        flexDirection: "row",
+        minHeight: code.lineHeight,
+        backgroundColor: hovered ? c.surface1 : undefined,
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
     >
       {renderPairCell(row.path, row.hunkIndex, row.oldIndex, "old", hunk, ctx)}
       <View style={{ width: 1, backgroundColor: c.border }} />
@@ -223,6 +295,7 @@ function renderPairRow(row: Extract<Row, { type: "pair" }>, ctx: StreamRowContex
 function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const { file } = row;
+  const isCurrentFile = ctx.currentPath === row.path;
   return (
     <View
       style={{
@@ -233,6 +306,8 @@ function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: Stream
         alignItems: "center",
         padding: space.sm,
         gap: space.sm,
+        borderLeftWidth: 2,
+        borderLeftColor: isCurrentFile ? c.accent : "transparent",
       }}
     >
       <Pressable accessibilityRole="checkbox" onPress={() => ctx.onToggleViewed(file)}>
@@ -250,6 +325,16 @@ function renderFileHeader(row: Extract<Row, { type: "fileHeader" }>, ctx: Stream
         </View>
         {!row.expanded && row.outlineSummary ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{row.outlineSummary}</Text> : null}
       </Pressable>
+      {row.expanded ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => ctx.onMarkViewedAndNext(file)}
+          style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: space.xs, paddingVertical: 2 }}
+        >
+          <Icon name="Check" size={13} color={c.accent} />
+          <Text style={{ ...font.caption, color: c.accent }}>Viewed &amp; next</Text>
+        </Pressable>
+      ) : null}
       <Pressable accessibilityRole="button" onPress={() => ctx.onOpenMove(row.path)} style={{ padding: space.xs }}>
         <Icon name="FolderSymlink" size={14} color={c.foregroundMuted} />
       </Pressable>
@@ -270,7 +355,8 @@ function renderFileMeta(row: Extract<Row, { type: "fileMeta" }>, ctx: StreamRowC
       {file.movedLines > 0 ? <Chip label={`moved ${file.movedLines}`} color={c.accent} /> : null}
       {file.complexity !== null ? <Chip label={`cx ${file.complexity}`} color={riskColor(file.complexity, c)} /> : null}
       <Text style={{ ...font.caption, color: c.foregroundMuted }}>{moduleSourceLabel(file)}</Text>
-      {file.viewed === "DISMISSED" ? (
+      {file.noiseReason ? <Text style={{ ...font.caption, color: c.foregroundMuted, fontStyle: "italic" }}>{file.noiseReason}</Text> : null}
+      {row.viewed === "DISMISSED" ? (
         <Pressable accessibilityRole="button" onPress={() => ctx.onRevealSinceViewed(row.path)}>
           <Text style={{ ...font.caption, color: row.sinceViewedHighlighted ? c.statusSuccess : c.statusWarning }}>
             {row.sinceViewedHighlighted ? "showing changes since you viewed" : "changed since you viewed"}
@@ -432,6 +518,7 @@ function renderComposer(row: Extract<Row, { type: "composer" }>, ctx: StreamRowC
       onAddToReview={ctx.onAddToReview}
       onCommentNow={ctx.onCommentNow}
       onSave={ctx.onSaveComposer}
+      autoFocus={ctx.composerAutoFocus}
     />
   );
 }
@@ -463,20 +550,31 @@ function renderCollapsed(row: Extract<Row, { type: "collapsed" }>, ctx: StreamRo
   );
 }
 
+const EXPAND_ALL_MAX = 500;
+
 function renderExpandContext(row: Extract<Row, { type: "expandContext" }>, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
+  const busyKey = `${row.path}:${row.position}:${row.hunkIndex}`;
+  const busy = ctx.contextPending.has(busyKey);
+  const nextPress = Math.min(20, row.count);
+  const showExpandAll = row.totalCount <= EXPAND_ALL_MAX && row.count > nextPress;
   return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={() => {
-        // Context expansion lands in wave 2 (keyboard nav + `prr.file.lines`); this affordance
-        // is shown now so the row layout doesn't shift later, but it's inert for now.
-      }}
-      style={{ minHeight: 24, backgroundColor: c.surface1, flexDirection: "row", alignItems: "center", gap: space.xs, paddingHorizontal: space.sm }}
-    >
-      <Icon name="ChevronsUpDown" size={12} color={c.foregroundMuted} />
-      <Text style={{ ...font.caption, color: c.foregroundMuted }}>Expand {row.count} lines</Text>
-    </Pressable>
+    <View style={{ minHeight: 24, backgroundColor: c.surface1, flexDirection: "row", alignItems: "center", gap: space.md, paddingHorizontal: space.sm }}>
+      <Pressable
+        accessibilityRole="button"
+        disabled={busy}
+        onPress={() => ctx.onExpandContext(row.path, row.position, row.hunkIndex, "press")}
+        style={{ flexDirection: "row", alignItems: "center", gap: space.xs, opacity: busy ? 0.6 : 1 }}
+      >
+        <Icon name="ChevronsUpDown" size={12} color={c.foregroundMuted} />
+        <Text style={{ ...font.caption, color: c.foregroundMuted }}>{busy ? "Expanding…" : `Expand ${nextPress} lines`}</Text>
+      </Pressable>
+      {showExpandAll ? (
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => ctx.onExpandContext(row.path, row.position, row.hunkIndex, "all")}>
+          <Text style={{ ...font.caption, color: c.accent }}>Expand all {row.count}</Text>
+        </Pressable>
+      ) : null}
+    </View>
   );
 }
 
@@ -532,8 +630,9 @@ function renderEmpty(row: Extract<Row, { type: "empty" }>, ctx: StreamRowContext
 }
 
 /** Renders one row of the diff stream. Call from `FlatList`'s `renderItem` — this is a plain
- * function (not a hook-using component) so it can safely branch on `row.type`. */
-export function renderStreamRow(row: Row, ctx: StreamRowContext): ReactElement | null {
+ * function (not a hook-using component) so it can safely branch on `row.type`. `index` is the
+ * row's position in the stream (needed for the keyboard cursor's accent border). */
+export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext): ReactElement | null {
   switch (row.type) {
     case "fileHeader":
       return renderFileHeader(row, ctx);
@@ -550,9 +649,9 @@ export function renderStreamRow(row: Row, ctx: StreamRowContext): ReactElement |
     case "collapsed":
       return renderCollapsed(row, ctx);
     case "line":
-      return renderLineRow(row, ctx);
+      return renderLineRow(row, index, ctx);
     case "pair":
-      return renderPairRow(row, ctx);
+      return renderPairRow(row, index, ctx);
     case "thread":
       return renderThread(row, ctx);
     case "finding":

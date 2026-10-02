@@ -19,6 +19,7 @@ export function InlineComposer({
   onAddToReview,
   onCommentNow,
   onSave,
+  autoFocus = true,
 }: {
   theme: Theme;
   mode: ComposerMode;
@@ -29,6 +30,10 @@ export function InlineComposer({
   onAddToReview: () => void;
   onCommentNow: () => void;
   onSave: () => void;
+  /** Only the composer's first mount (for a given target) should steal focus — a virtualized
+   * list cell can unmount and remount as it scrolls out of and back into the render window, and
+   * re-focusing on every one of those remounts would steal focus/scroll out from under the user. */
+  autoFocus?: boolean;
 }) {
   const c = theme.colors;
   const s = surfaces(c);
@@ -46,7 +51,7 @@ export function InlineComposer({
         onKeyPress={handleKeyPress}
         placeholder="Leave a comment…"
         multiline
-        autoFocus
+        autoFocus={autoFocus}
         style={{ ...s.input, minHeight: 90 }}
       />
       <Text style={{ ...font.caption, color: c.foregroundMuted }}>Markdown supported</Text>
