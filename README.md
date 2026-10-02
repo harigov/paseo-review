@@ -9,11 +9,15 @@ A [Paseo](https://paseo.sh) plugin for reviewing large GitHub pull requests.
   risk, complexity and viewed progress.
 - **Reading order:** foundations first (definitions before use), riskiest first, or
   chronological.
-- **Diff viewer:** inline or side-by-side, fast scrolling on huge files, moved-code detection,
-  whitespace-only and pure-move collapse (with visible whitespace markers when expanded),
-  syntax highlighting, inline threads and validator findings.
-- **Review comments:** a "+" on every line, drafts shown inline with edit and delete, "Add to
-  review" or "Comment now", reply from the diff, and edit or delete your own comments.
+- **Diff viewer:** one continuous stream per module with sticky file headers and a minimap,
+  inline or side-by-side, word-level change highlighting, expandable context, moved-code
+  detection, whitespace-only and pure-move collapse (with visible whitespace markers when
+  expanded), syntax highlighting, inline threads and validator findings.
+- **Keyboard review on desktop:** `j`/`k` files, `v` viewed and next, `n` next unresolved,
+  `[`/`]` hunks, arrows and `c` to comment at the cursor, `?` for the sheet; `/` searches the inbox.
+- **Review comments:** a "+" on every line, an inline composer, drafts shown in place with edit
+  and delete, "Add to review" or "Comment now", reply from the diff, and edit or delete your
+  own comments. The header shows review progress with a "Next unviewed" jump.
 - **Outline diff:** per file, which functions, classes and types were added, removed,
   modified, renamed, moved or had their signature changed (TypeScript/JavaScript, Python, Go,
   Rust, Java, Kotlin, Ruby). The Overview lists exported declarations whose signature changed.
@@ -105,8 +109,8 @@ from your Paseo agent profiles and available providers.
 
 **Precompute.** Interval, daily agent budget, skip drafts and size cap.
 
-**Reading and diff.** Default reading order and default diff layout (inline or split); both can
-be toggled per PR in the PR screen header.
+**Reading and diff.** Default reading order, default diff layout (inline or split) and diff
+density (comfortable or compact); order and layout can be toggled per PR in the PR screen header.
 
 ## Repo configuration (optional)
 
@@ -166,5 +170,6 @@ npm run check:bundle   # esbuild bundle check mirroring Paseo's plugin compiler
 npm test               # vitest
 ```
 
-See [docs/plan.md](docs/plan.md) and [docs/plan-round2.md](docs/plan-round2.md) for the design
+See [docs/plan.md](docs/plan.md), [docs/plan-round2.md](docs/plan-round2.md) and
+[docs/plan-round3.md](docs/plan-round3.md) for the design
 and [THIRD_PARTY.md](THIRD_PARTY.md) for attributions.

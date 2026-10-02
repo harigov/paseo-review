@@ -55,3 +55,15 @@ Not in scope this round: header compression, hiding reviewer-irrelevant jargon.
 unviewed, `n` next unresolved item (open thread or failing finding), `[` / `]` previous / next
 hunk, `↑` / `↓` move the line cursor, `c` comment at the cursor, `e` expand/collapse the current
 file, `?` shortcut sheet. Ignored while an input is focused. `/` focuses search in the inbox.
+
+## Status (2026-10-01)
+
+All workstreams merged on `paseo-pr-review-ui-enhancements`. Changes versus the design above:
+`FileDiff.totalLines` replaced the client-side line-count probe; `FILE_LINES_MAX` is shared
+between server and client; the per-file "Viewed & next" action was kept on the sticky header
+alongside the module-level "Mark module viewed"; Stop/interrupt for chat is still unavailable
+in the plugin client API.
+
+Known limits: context expansion treats a gap that spans a dropped (over-budget) hunk as
+unsafe and does not expand it; the keyboard layer is web only; nothing in this round has been
+exercised inside the Paseo app yet (typecheck, unit tests and bundle only).
