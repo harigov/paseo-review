@@ -1,4 +1,4 @@
-import type { ReadingOrder, ViewedState } from "../../shared/types";
+import type { ReadingOrder, Thread, ViewedState } from "../../shared/types";
 import type { Row } from "./rows";
 
 /**
@@ -108,6 +108,43 @@ export function nextUnviewedPath(files: UnviewedCandidate[], afterPath: string |
   }
   for (let i = 0; i <= startIndex && i < sorted.length; i += 1) {
     if (sorted[i].viewed !== "VIEWED") return sorted[i].path;
+  }
+  return null;
+}
+
+/** Minimal shape `nextFileWithUnresolved` needs for a finding — narrower than `ValidatorFinding`
+ * so callers can pass the plain finding data without the validator-id/title decoration. */
+export interface UnresolvedFindingLike {
+  status: "fail" | "uncertain";
+  dismissed: boolean;
+}
+
+/**
+ * Path of the next file (in `files`' given order) that has an unresolved review item — an open
+ * thread, or a failing, non-dismissed finding — after `afterPath`, wrapping around the whole list
+ * when nothing qualifies after it. Used by `n` to reach unresolved items in a *collapsed* file,
+ * which `nextUnresolvedIndex` can't see (it only looks at rendered rows, and a collapsed file
+ * renders only its header). `afterPath === null`, or a path not present in `files`, starts the
+ * search from the beginning. Returns `null` when no file has an unresolved item.
+ */
+export function nextFileWithUnresolved(
+  files: ReadonlyArray<{ path: string }>,
+  threadsByPath: ReadonlyMap<string, Thread[]>,
+  findingsByPath: ReadonlyMap<string, UnresolvedFindingLike[]>,
+  afterPath: string | null,
+): string | null {
+  function hasUnresolved(path: string): boolean {
+    const threads = threadsByPath.get(path);
+    if (threads?.some((thread) => !thread.isResolved)) return true;
+    const findings = findingsByPath.get(path);
+    return findings?.some((finding) => finding.status === "fail" && !finding.dismissed) ?? false;
+  }
+  const startIndex = afterPath !== null ? files.findIndex((file) => file.path === afterPath) : -1;
+  for (let i = startIndex + 1; i < files.length; i += 1) {
+    if (hasUnresolved(files[i].path)) return files[i].path;
+  }
+  for (let i = 0; i <= startIndex && i < files.length; i += 1) {
+    if (hasUnresolved(files[i].path)) return files[i].path;
   }
   return null;
 }

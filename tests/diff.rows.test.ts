@@ -270,6 +270,32 @@ describe("buildStreamRows — collapsed hunks", () => {
     });
     expect(rows.some((r) => r.type === "collapsed" && r.kind === "whitespace")).toBe(true);
   });
+
+  it("suppresses adjacent context lines and expand placeholders while the neighboring hunk is collapsed", () => {
+    // Fetched context would otherwise render unhighlighted next to a still-collapsed hunk (its
+    // tokens/intraline caches skip collapsed hunks entirely) — so nothing for the gap is shown
+    // until the hunk itself is expanded.
+    const movedAt10 = hunk({ lines: [del(10), add(10)], oldStart: 10, newStart: 10, pureMove: true });
+    const diffWithGap = fileDiff({ path: "a.ts", hunks: [movedAt10] });
+    const fetched = new Map([[9, "fetched 9"]]); // contiguous with the hunk, for the "above" gap
+
+    const collapsedRows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, expanded: true, diff: diffWithGap, contextLines: fetched })],
+    });
+    expect(collapsedRows.some((r) => r.type === "expandContext")).toBe(false);
+    expect(collapsedRows.some((r) => r.type === "line")).toBe(false);
+
+    const expandedRows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [baseFileInput({ file, expanded: true, diff: diffWithGap, contextLines: fetched, expandedHunks: new Set([0]) })],
+    });
+    expect(expandedRows.find((r) => r.type === "expandContext" && r.position === "above")).toMatchObject({ count: 8 });
+    expect(expandedRows.some((r) => r.type === "line" && r.hunkIndex === 0 && r.lineIndex === 0)).toBe(true);
+    expect(expandedRows.filter((r) => r.type === "line")).toHaveLength(3); // fetched context + del + add
+  });
 });
 
 describe("expand-context placeholders", () => {
@@ -365,6 +391,26 @@ describe("expand-context placeholders", () => {
     });
     const between = rows.find((r) => r.type === "expandContext" && r.position === "between");
     expect(between).toMatchObject({ position: "between", oldStart: 6, newStart: 8, count: 2, totalCount: 2 });
+  });
+
+  it("renders an unsafe, non-expandable placeholder for a 'between' gap spanning a dropped hunk", () => {
+    // h2's old/new numbering implies a net -2 shift that nothing visible between h1 and h2
+    // explains — the signature of a hunk having been dropped from this truncated diff.
+    const h1 = hunk({ lines: [ctx(1, 1)], oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const h2 = hunk({ lines: [ctx(200, 200)], oldStart: 6, oldLines: 1, newStart: 4, newLines: 1 });
+    const rows = buildStreamRows({
+      split: false,
+      composer: null,
+      files: [
+        baseFileInput({
+          file: analyzedFile({ path: "a.ts" }),
+          expanded: true,
+          diff: fileDiff({ path: "a.ts", hunks: [h1, h2], truncated: true }),
+        }),
+      ],
+    });
+    const between = rows.find((r) => r.type === "expandContext" && r.position === "between");
+    expect(between).toMatchObject({ position: "between", unsafe: true, count: 4, totalCount: 4 });
   });
 });
 

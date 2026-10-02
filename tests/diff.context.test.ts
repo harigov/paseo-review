@@ -17,7 +17,7 @@ function hunk(partial: Partial<Hunk> & { oldStart: number; newStart: number }): 
 describe("gapsForFile", () => {
   it("emits an 'above' gap when the first hunk doesn't start at line 1", () => {
     const gaps = gapsForFile([hunk({ oldStart: 10, newStart: 10 })], null);
-    expect(gaps).toEqual([{ position: "above", hunkIndex: 0, oldStart: 1, newStart: 1, count: 9 }]);
+    expect(gaps).toEqual([{ position: "above", hunkIndex: 0, oldStart: 1, newStart: 1, count: 9, unsafe: false }]);
   });
 
   it("emits no 'above' gap when the first hunk starts at line 1", () => {
@@ -25,11 +25,30 @@ describe("gapsForFile", () => {
     expect(gaps).toEqual([]);
   });
 
+  it("sizes a pure-deletion first hunk's 'above' gap from the new side, not the old side", () => {
+    // @@ -6,2 +5,0 @@ as the first hunk: old lines 1-5 precede it, but new line 5 is the
+    // deletion's anchor (unified-diff convention), not a line `prr.file.lines` (head-side) can
+    // ever return — sizing from `oldStart` (5 lines) would leave a permanently-stuck "Expand 1
+    // lines" remainder once the 4 fetchable new-side lines (1-4) have all been fetched.
+    const h = hunk({ oldStart: 6, oldLines: 2, newStart: 5, newLines: 0 });
+    const gaps = gapsForFile([h], null);
+    expect(gaps).toEqual([{ position: "above", hunkIndex: 0, oldStart: 1, newStart: 1, count: 4, unsafe: false }]);
+  });
+
+  it("sizes a pure-insertion first hunk's 'above' gap from the new side, not the old side", () => {
+    // @@ -5,0 +6,2 @@ as the first hunk: old line 5 is the insertion's anchor and is itself
+    // unchanged content that must still be fetchable (as new line 5) — sizing from `oldStart`
+    // (4 lines) would mean line 5 could never be requested via "Expand".
+    const h = hunk({ oldStart: 5, oldLines: 0, newStart: 6, newLines: 2 });
+    const gaps = gapsForFile([h], null);
+    expect(gaps).toEqual([{ position: "above", hunkIndex: 0, oldStart: 1, newStart: 1, count: 5, unsafe: false }]);
+  });
+
   it("emits a 'between' gap sized from the old-side offset, with matching new-side numbering", () => {
     const h1 = hunk({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
     const h2 = hunk({ oldStart: 20, newStart: 20 });
     const gaps = gapsForFile([h1, h2], null);
-    expect(gaps).toEqual([{ position: "between", hunkIndex: 1, oldStart: 2, newStart: 2, count: 18 }]);
+    expect(gaps).toEqual([{ position: "between", hunkIndex: 1, oldStart: 2, newStart: 2, count: 18, unsafe: false }]);
   });
 
   it("emits no 'between' gap when two hunks are adjacent", () => {
@@ -46,7 +65,7 @@ describe("gapsForFile", () => {
     const h2 = hunk({ oldStart: 8, oldLines: 1, newStart: 10, newLines: 1 });
     const gaps = gapsForFile([h1, h2], null);
     const between = gaps.find((g) => g.position === "between");
-    expect(between).toEqual({ position: "between", hunkIndex: 1, oldStart: 6, newStart: 8, count: 2 });
+    expect(between).toEqual({ position: "between", hunkIndex: 1, oldStart: 6, newStart: 8, count: 2, unsafe: false });
   });
 
   it("handles a pure-deletion hunk (newLines 0) symmetrically on the new side", () => {
@@ -57,7 +76,7 @@ describe("gapsForFile", () => {
     const h2 = hunk({ oldStart: 11, oldLines: 1, newStart: 9, newLines: 1 });
     const gaps = gapsForFile([h1, h2], null);
     const between = gaps.find((g) => g.position === "between");
-    expect(between).toEqual({ position: "between", hunkIndex: 1, oldStart: 8, newStart: 6, count: 3 });
+    expect(between).toEqual({ position: "between", hunkIndex: 1, oldStart: 8, newStart: 6, count: 3, unsafe: false });
   });
 
   it("emits no 'below' gap when totalLines is null (unknown or not applicable)", () => {
@@ -68,7 +87,7 @@ describe("gapsForFile", () => {
   it("emits a 'below' gap sized from totalLines, once known", () => {
     const h = hunk({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
     const gaps = gapsForFile([h], 25);
-    expect(gaps).toEqual([{ position: "below", hunkIndex: 0, oldStart: 2, newStart: 2, count: 24 }]);
+    expect(gaps).toEqual([{ position: "below", hunkIndex: 0, oldStart: 2, newStart: 2, count: 24, unsafe: false }]);
   });
 
   it("emits no 'below' gap when the last hunk already reaches the end of the file", () => {
@@ -85,6 +104,32 @@ describe("gapsForFile", () => {
   it("reports a gap count over the ≤ 500 'expand all' threshold for a very large gap", () => {
     const gaps = gapsForFile([hunk({ oldStart: 2000, newStart: 2000 })], null);
     expect(gaps[0].count > 500).toBe(true);
+  });
+
+  it("marks a 'between' gap unsafe when a dropped hunk in a truncated diff makes the sizes disagree", () => {
+    // h2's old/new numbering implies a net -2 shift versus h1 that isn't explained by anything
+    // visible between them — the signature of a hunk having been dropped from the middle.
+    const h1 = hunk({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const h2 = hunk({ oldStart: 6, oldLines: 1, newStart: 4, newLines: 1 });
+    const gaps = gapsForFile([h1, h2], null, true);
+    const between = gaps.find((g) => g.position === "between");
+    expect(between).toMatchObject({ position: "between", oldStart: 2, newStart: 2, count: 4, unsafe: true });
+  });
+
+  it("does not mark a 'between' gap unsafe when the old/new sizes agree, even in a truncated diff", () => {
+    const h1 = hunk({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const h2 = hunk({ oldStart: 20, newStart: 20 });
+    const gaps = gapsForFile([h1, h2], null, true);
+    const between = gaps.find((g) => g.position === "between");
+    expect(between).toMatchObject({ unsafe: false });
+  });
+
+  it("does not mark a mismatched 'between' gap unsafe when the diff isn't truncated", () => {
+    const h1 = hunk({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
+    const h2 = hunk({ oldStart: 6, oldLines: 1, newStart: 4, newLines: 1 });
+    const gaps = gapsForFile([h1, h2], null, false);
+    const between = gaps.find((g) => g.position === "between");
+    expect(between).toMatchObject({ unsafe: false });
   });
 });
 

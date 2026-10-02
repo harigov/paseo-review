@@ -33,8 +33,17 @@ import {
 import { renderStreamRow, type StreamRowContext } from "../diff/DiffRows";
 import { Minimap, type MinimapScrollMetrics } from "../diff/Minimap";
 import { expandTabs } from "../diff/pairing";
-import { gapsForFile, mergeContextLines, type ContextGap, type ContextGapPosition } from "../diff/context";
-import { moveCursor, nextFileIndex, nextHunkIndex, nextUnresolvedIndex, nextUnviewedPath, type NavDirection } from "../diff/keyboard";
+import { CONTEXT_PAGE_SIZE, gapsForFile, mergeContextLines, type ContextGap, type ContextGapPosition } from "../diff/context";
+import {
+  moveCursor,
+  nextFileIndex,
+  nextFileWithUnresolved,
+  nextHunkIndex,
+  nextUnresolvedIndex,
+  nextUnviewedPath,
+  type NavDirection,
+  type UnresolvedFindingLike,
+} from "../diff/keyboard";
 import { intralineForPairs, type Span } from "../diff/intraline";
 import { addDraft, removeDraft, updateDraft, useDrafts, type DraftComment } from "./drafts";
 import { isDarkSurface } from "../ui/color";
@@ -218,17 +227,35 @@ function rowPropsEqual(
   switch (row.type) {
     case "fileHeader":
       return (a.currentPath === row.path) === (b.currentPath === row.path) && a.viewModeOf(row.path) === b.viewModeOf(row.path);
-    case "line":
-    case "pair":
+    case "line": {
+      // Only this row's own hover state matters — comparing `hoverKey`/`hoveredRowKey` directly
+      // (their raw values) would re-render every visible code row on any hover change anywhere
+      // in the file, since those are single shared fields, not per-row.
+      const rowKey = `row-line-${row.path}-${row.hunkIndex}-${row.lineIndex}`;
+      const gutterKey = `line-${row.path}-${row.hunkIndex}-${row.lineIndex}`;
       return (
         a.getHunk(row.path, row.hunkIndex) === b.getHunk(row.path, row.hunkIndex) &&
         a.getTokens(row.path, row.hunkIndex) === b.getTokens(row.path, row.hunkIndex) &&
         a.getIntraline(row.path, row.hunkIndex) === b.getIntraline(row.path, row.hunkIndex) &&
-        a.hoverKey === b.hoverKey &&
-        a.hoveredRowKey === b.hoveredRowKey
+        (a.hoveredRowKey === rowKey) === (b.hoveredRowKey === rowKey) &&
+        (a.hoverKey === gutterKey) === (b.hoverKey === gutterKey)
       );
+    }
+    case "pair": {
+      const rowKey = `row-pair-${row.path}-${row.hunkIndex}-${row.oldIndex ?? "x"}-${row.newIndex ?? "x"}`;
+      const oldGutterKey = `pair-${row.path}-${row.hunkIndex}-${row.oldIndex ?? "x"}-old`;
+      const newGutterKey = `pair-${row.path}-${row.hunkIndex}-${row.newIndex ?? "x"}-new`;
+      return (
+        a.getHunk(row.path, row.hunkIndex) === b.getHunk(row.path, row.hunkIndex) &&
+        a.getTokens(row.path, row.hunkIndex) === b.getTokens(row.path, row.hunkIndex) &&
+        a.getIntraline(row.path, row.hunkIndex) === b.getIntraline(row.path, row.hunkIndex) &&
+        (a.hoveredRowKey === rowKey) === (b.hoveredRowKey === rowKey) &&
+        (a.hoverKey === oldGutterKey) === (b.hoverKey === oldGutterKey) &&
+        (a.hoverKey === newGutterKey) === (b.hoverKey === newGutterKey)
+      );
+    }
     case "composer":
-      return a.composerBody === b.composerBody && a.composerBusy === b.composerBusy && a.composerAutoFocus === b.composerAutoFocus;
+      return a.composerBody === b.composerBody && a.composerBusy === b.composerBusy;
     case "thread":
       return (
         a.isReplyOpen(row.thread.id) === b.isReplyOpen(row.thread.id) &&
@@ -281,8 +308,6 @@ const DELETE_CONFIRM_MS = 4_000;
 /** How long after a keyboard-driven scroll to ignore `onViewableItemsChanged`'s own idea of
  * `currentPath`, so the scroll settling doesn't immediately overwrite what the key press set. */
 const KEYBOARD_NAV_SETTLE_MS = 500;
-/** `prr.file.lines` lines fetched per "Expand" press. */
-const CONTEXT_PAGE_SIZE = 20;
 
 export function ModuleTab(props: ModuleTabProps) {
   const { theme, analysis, detail, repo, number, moduleId, readingOrder, sinceLastReview, refresh, openChat } = props;
@@ -323,24 +348,33 @@ export function ModuleTab(props: ModuleTabProps) {
   const [sendingReply, setSendingReply] = useState<string | null>(null);
   const [pendingDeleteCommentId, setPendingDeleteCommentId] = useState<string | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState<MinimapScrollMetrics | null>(null);
-  const [totalLinesByPath, setTotalLinesByPath] = useState<Record<string, number | null>>({});
   const [contextFetchedByPath, setContextFetchedByPath] = useState<Record<string, ReadonlyMap<number, string>>>({});
   const [contextPending, setContextPending] = useState<ReadonlySet<string>>(new Set());
   const [currentPath, setCurrentPath] = useState<string | null>(null);
-  const [cursorIndex, setCursorIndex] = useState<number | null>(null);
+  // Identifies the cursor row by its stable `key`, not its raw index — `rows` gets rebuilt (and
+  // every row's index can shift) on collapse/expand, context fetches, a refresh, or a module
+  // switch, which would otherwise leave the cursor border (and `c`) on an unrelated row. The
+  // index is resolved from the key lazily (and memoised) just below.
+  const [cursorKey, setCursorKey] = useState<string | null>(null);
   const [shortcutSheetOpen, setShortcutSheetOpen] = useState(false);
 
   const listRef = useRef<NativeFlatList<Row> | null>(null);
   const focusRetriedRef = useRef(false);
-  const totalLinesRequestedRef = useRef<Set<string>>(new Set());
   const keyboardNavUntilRef = useRef(0);
   const viewableRangeRef = useRef<{ min: number; max: number }>({ min: 0, max: -1 });
-  const lastComposerKeyRef = useRef<string | null>(null);
+  // The path a keyboard-driven jump to the next unresolved thread/finding is waiting to land on
+  // once that (currently collapsed) file's rows exist — see `jumpToUnresolved`.
+  const pendingUnresolvedTargetRef = useRef<string | null>(null);
   const effectiveHunksCacheRef = useRef(new Map<string, { key: { diff: FileDiff; fetched: ReadonlyMap<number, string> }; value: Hunk[] }>());
   const hunkTokensCacheRef = useRef(new Map<string, { key: { hunks: Hunk[]; expandedHunks: ReadonlySet<number> }; value: HighlightToken[][][] }>());
   const hunkIntralineCacheRef = useRef(
     new Map<string, { key: { hunks: Hunk[]; expandedHunks: ReadonlySet<number> }; value: Array<Array<Span[] | null>> }>(),
   );
+  // The freshest `headSha`, read from inside async callbacks (e.g. a context-line fetch) that
+  // close over whatever `headSha` was current when they *started* — so they can tell whether a
+  // push landed (and reset state) before they resolved, and skip applying a now-stale result.
+  const headShaRef = useRef(headSha);
+  headShaRef.current = headSha;
 
   // Optimistic overrides exist only to bridge the gap until a fresh `analysis` lands. Once a
   // new snapshot arrives (react-query gives this a new reference only when content actually
@@ -353,13 +387,20 @@ export function ModuleTab(props: ModuleTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analysis]);
 
-  // Fetched context lines and total-line counts are tied to a specific head commit; a new push
-  // invalidates both (line numbers can shift, and a probe from before the push would be wrong).
+  // Fetched context lines are tied to a specific head commit; a new push invalidates them (line
+  // numbers can shift, and a fetch from before the push would be wrong — see `headShaRef` above
+  // for in-flight fetches specifically).
   useEffect(() => {
-    totalLinesRequestedRef.current = new Set();
-    setTotalLinesByPath({});
     setContextFetchedByPath({});
   }, [headSha]);
+
+  // The cursor and current-file tracking are row/path identities scoped to whatever module is
+  // showing; switching modules invalidates both (a stale cursor key almost certainly doesn't
+  // exist in the new module's rows, but even a coincidental match would be the wrong row).
+  useEffect(() => {
+    setCursorKey(null);
+    setCurrentPath(null);
+  }, [moduleId]);
 
   const allFiles = analysis?.files ?? [];
 
@@ -419,6 +460,31 @@ export function ModuleTab(props: ModuleTabProps) {
     });
     return map;
   }, [allDrafts]);
+
+  // Grouped by path (independent of any file's expanded state, unlike `streamFileInputs`'
+  // per-file `threads`/`findings`) so `jumpToUnresolved` can check a *collapsed* file for an
+  // unresolved item without needing it expanded first.
+  const threadsByPath = useMemo(() => {
+    const map = new Map<string, Thread[]>();
+    (detail?.threads ?? []).forEach((thread) => {
+      const list = map.get(thread.path);
+      if (list) list.push(thread);
+      else map.set(thread.path, [thread]);
+    });
+    return map;
+  }, [detail]);
+  const findingsByPath = useMemo(() => {
+    const map = new Map<string, UnresolvedFindingLike[]>();
+    (analysis?.validators ?? []).forEach((result) => {
+      result.findings.forEach((finding) => {
+        if (finding.path === null) return;
+        const list = map.get(finding.path);
+        if (list) list.push(finding);
+        else map.set(finding.path, [finding]);
+      });
+    });
+    return map;
+  }, [analysis]);
 
   // Only expanded, text-mode files need their diff fetched; structure-mode files render via
   // StructuralDiffView, which fetches independently.
@@ -571,7 +637,7 @@ export function ModuleTab(props: ModuleTabProps) {
           diff: diffEntry?.diff ?? null,
           diffErrorMessage: diffEntry?.error ?? null,
           expandedHunks: expandedHunksByPath[file.path] ?? EMPTY_HUNK_SET,
-          totalLines: totalLinesByPath[file.path] ?? null,
+          totalLines: diffEntry?.diff?.totalLines ?? null,
           contextLines: contextFetchedByPath[file.path] ?? EMPTY_CONTEXT_MAP,
           threads: fileThreads,
           findings: fileFindings,
@@ -590,7 +656,6 @@ export function ModuleTab(props: ModuleTabProps) {
       outlineExpandedByPath,
       sinceViewedPaths,
       expandedHunksByPath,
-      totalLinesByPath,
       contextFetchedByPath,
     ],
   );
@@ -605,6 +670,16 @@ export function ModuleTab(props: ModuleTabProps) {
   );
   const stickyHeaderIndices = useMemo(() => stickyIndices(rows), [rows]);
   const segments = useMemo(() => fileSegments(rows), [rows]);
+
+  // Resolved lazily from `cursorKey` rather than stored directly: `rows` rebuilds on collapse/
+  // expand, context fetches, a refresh, etc., shifting every row's index, so a raw stored index
+  // would end up pointing at an unrelated row. `null` here (not found, e.g. the cursor's file just
+  // collapsed) naturally clears the accent border rather than drawing it on the wrong row.
+  const cursorIndex = useMemo(() => {
+    if (cursorKey === null) return null;
+    const index = rows.findIndex((row) => row.key === cursorKey);
+    return index === -1 ? null : index;
+  }, [rows, cursorKey]);
 
   // Prefetch the next unviewed file's diff as soon as a file expands, so paging through the
   // module in reading order rarely shows a loading row. `staleTime` and the cache check keep a
@@ -624,26 +699,6 @@ export function ModuleTab(props: ModuleTabProps) {
       void queryClient.prefetchQuery({ queryKey, queryFn: () => fileDiffFetcher({ repo, number, path: next.path, scope }), staleTime: 60_000 });
     });
   }, [expanded, visibleFiles, viewedOverride, viewModeByPath, sinceViewedPaths, sinceLastReview, repo, number, queryClient, fileDiffFetcher]);
-
-  // Probe each expanded text-mode file's total (head-side) line count once, so the "below"
-  // context gap has a size to show. Deleted files have no head content to probe.
-  useEffect(() => {
-    visibleFiles.forEach((file) => {
-      if (expanded[file.path] !== true) return;
-      if (file.status === "deleted") return;
-      const mode = viewModeByPath.get(file.path) ?? "text";
-      if (!needsTextDiff(file, mode)) return;
-      if (totalLinesRequestedRef.current.has(file.path)) return;
-      totalLinesRequestedRef.current.add(file.path);
-      fileLinesFetcher({ repo, number, path: file.path, side: "head", start: 1, end: 1 })
-        .then((result) => {
-          setTotalLinesByPath((prev) => ({ ...prev, [file.path]: result.totalLines }));
-        })
-        .catch(() => {
-          totalLinesRequestedRef.current.delete(file.path); // allow a retry on a later render
-        });
-    });
-  }, [visibleFiles, expanded, viewModeByPath, repo, number, fileLinesFetcher]);
 
   function scrollToFile(path: string) {
     const index = rows.findIndex((row) => row.type === "fileHeader" && row.path === path);
@@ -820,8 +875,8 @@ export function ModuleTab(props: ModuleTabProps) {
   function expandContext(path: string, position: ContextGapPosition, hunkIndex: number, mode: "press" | "all") {
     const diff = diffByPath.get(path)?.diff;
     if (!diff) return;
-    const gap = gapsForFile(diff.hunks, totalLinesByPath[path] ?? null).find((g) => g.position === position && g.hunkIndex === hunkIndex);
-    if (!gap) return;
+    const gap = gapsForFile(diff.hunks, diff.totalLines, diff.truncated).find((g) => g.position === position && g.hunkIndex === hunkIndex);
+    if (!gap || gap.unsafe) return; // unsafe gaps offer no expand action (see DiffRows' renderer)
     const fetchedMap = contextFetchedByPath[path] ?? EMPTY_CONTEXT_MAP;
     const already = countFetchedInGap(fetchedMap, gap);
     const remaining = gap.count - already;
@@ -838,8 +893,13 @@ export function ModuleTab(props: ModuleTabProps) {
     }
     const busyKey = `${path}:${position}:${hunkIndex}`;
     setContextPending((prev) => new Set(prev).add(busyKey));
+    // Captured at request time: if a push lands (and `headSha` changes, resetting
+    // `contextFetchedByPath`) before this resolves, `headShaRef.current` will have moved on and
+    // the result below is discarded instead of re-populating state with now-stale line numbers.
+    const requestSha = headSha;
     fileLinesFetcher({ repo, number, path, side: "head", start, end })
       .then((result) => {
+        if (headShaRef.current !== requestSha) return;
         setContextFetchedByPath((prev) => {
           const next = { ...prev };
           const map = new Map(next[path] ?? []);
@@ -1033,27 +1093,34 @@ export function ModuleTab(props: ModuleTabProps) {
     requestScroll(index, 0.5);
   }
 
-  function goToFile(direction: NavDirection) {
+  function goToFile(direction: NavDirection): boolean {
     const headerIndex = nextFileIndex(rows, currentPath, direction);
-    if (headerIndex === null) return;
+    if (headerIndex === null) return false;
     const row = rows[headerIndex];
-    if (row.type !== "fileHeader") return;
+    if (row.type !== "fileHeader") return false;
     markKeyboardNav();
     if (expanded[row.path] !== true) setExpanded((prev) => ({ ...prev, [row.path]: true }));
     setCurrentPath(row.path);
-    setCursorIndex(null);
+    setCursorKey(null);
     requestScroll(headerIndex, 0);
+    return true;
   }
 
-  function toggleExpandCurrent() {
-    if (currentPath !== null) toggleExpand(currentPath);
+  function toggleExpandCurrent(): boolean {
+    if (currentPath === null) return false;
+    toggleExpand(currentPath);
+    return true;
   }
 
-  /** Marks `file` viewed and moves to the next not-fully-viewed file in reading order (expand +
-   * scroll) — used by both the `v` key and each file header's "Viewed & next" button. Computes
-   * "next" against the optimistic viewed state (treating `file` itself as already VIEWED), not
-   * the raw (possibly stale) analysis flag, so it doesn't re-offer the file just marked. */
-  function markViewedAndNext(file: AnalyzedFile) {
+  /** Marks `file` viewed and moves to the next not-fully-viewed file in reading order — used by
+   * both the `v` key and each file header's "Viewed & next" button. Computes "next" against the
+   * optimistic viewed state (treating `file` itself as already VIEWED), not the raw (possibly
+   * stale) analysis flag, so it doesn't re-offer the file just marked. Delegates the actual
+   * expand-and-scroll to `props.focusPath` (the same mechanism "Next unviewed" and the outline
+   * use) rather than scrolling to a `fileHeader` index computed before the current file's own
+   * collapse (triggered just above) has rebuilt `rows` — that stale index would point at
+   * whatever row happens to be there after the collapse, not the intended next file. */
+  function markViewedAndNext(file: AnalyzedFile): void {
     void toggleViewed(file, true);
     setExpanded((prev) => ({ ...prev, [file.path]: false }));
     const candidates = visibleFiles.map((candidate) => ({
@@ -1063,81 +1130,101 @@ export function ModuleTab(props: ModuleTabProps) {
     }));
     const next = nextUnviewedPath(candidates, file.path, readingOrder);
     if (!next) return;
-    markKeyboardNav();
-    setExpanded((prev) => ({ ...prev, [next]: true }));
-    setCurrentPath(next);
-    const index = rows.findIndex((row) => row.type === "fileHeader" && row.path === next);
-    if (index !== -1) requestScroll(index, 0);
+    props.setFocusPath(next);
   }
 
-  function markCurrentViewedAndNext() {
-    if (currentPath === null) return;
+  function markCurrentViewedAndNext(): boolean {
+    if (currentPath === null) return false;
     const file = visibleFiles.find((candidate) => candidate.path === currentPath);
-    if (file) markViewedAndNext(file);
+    if (!file) return false;
+    markViewedAndNext(file);
+    return true;
   }
 
-  function jumpHunk(direction: NavDirection) {
+  function jumpHunk(direction: NavDirection): boolean {
     const index = nextHunkIndex(rows, cursorIndex, direction);
-    if (index === null) return;
+    if (index === null) return false;
     const row = rows[index];
     markKeyboardNav();
-    setCursorIndex(index);
+    setCursorKey(row.key);
     if (row.path) setCurrentPath(row.path);
     scrollIntoViewIfNeeded(index);
+    return true;
   }
 
-  function jumpToUnresolved() {
+  /** `n`: jumps to the next open thread or failing (non-dismissed) finding. `nextUnresolvedIndex`
+   * only sees rows that actually exist, i.e. only *expanded* files — when it comes up empty, that
+   * means nothing unresolved is visible right now, not that nothing unresolved exists; fall back
+   * to searching every visible file (expanded or not) and, if one has an unresolved item, expand
+   * it and remember it as the pending target so the cursor can land on it once its rows exist
+   * (its diff may still need to load — see the effect below). */
+  function jumpToUnresolved(): boolean {
     const index = nextUnresolvedIndex(rows, cursorIndex);
-    if (index === null) return;
-    const row = rows[index];
+    if (index !== null) {
+      const row = rows[index];
+      markKeyboardNav();
+      setCursorKey(row.key);
+      if (row.path) setCurrentPath(row.path);
+      requestScroll(index, 0.5); // always scroll: `n` should never look like a no-op
+      return true;
+    }
+    const nextPath = nextFileWithUnresolved(visibleFiles, threadsByPath, findingsByPath, currentPath);
+    if (!nextPath) return false;
     markKeyboardNav();
-    setCursorIndex(index);
-    if (row.path) setCurrentPath(row.path);
-    scrollIntoViewIfNeeded(index);
+    pendingUnresolvedTargetRef.current = nextPath;
+    setCurrentPath(nextPath);
+    if (expanded[nextPath] !== true) setExpanded((prev) => ({ ...prev, [nextPath]: true }));
+    return true;
   }
 
-  function moveCursorDir(direction: NavDirection) {
+  function moveCursorDir(direction: NavDirection): boolean {
     const index = moveCursor(rows, cursorIndex, direction);
-    if (index === null) return;
+    if (index === null) return false;
     const row = rows[index];
     markKeyboardNav();
-    setCursorIndex(index);
+    setCursorKey(row.key);
     if (row.path) setCurrentPath(row.path);
     scrollIntoViewIfNeeded(index);
+    return true;
   }
 
-  function openComposerAtCursor() {
-    if (cursorIndex === null) return;
+  function openComposerAtCursor(): boolean {
+    if (cursorIndex === null) return false;
     const row = rows[cursorIndex];
-    if (!row) return;
+    if (!row) return false;
     if (row.type === "line") {
       const hunk = getHunk(row.path, row.hunkIndex);
       const line = hunk?.lines[row.lineIndex];
-      if (!line) return;
+      if (!line) return false;
       if (line.newNo !== null) openComposer(row.path, "RIGHT", line.newNo);
       else if (line.oldNo !== null) openComposer(row.path, "LEFT", line.oldNo);
+      else return false;
+      return true;
     } else if (row.type === "pair") {
       const hunk = getHunk(row.path, row.hunkIndex);
-      if (!hunk) return;
+      if (!hunk) return false;
       const newLine = row.newIndex !== null ? hunk.lines[row.newIndex] : null;
       if (newLine && newLine.newNo !== null) {
         openComposer(row.path, "RIGHT", newLine.newNo);
-        return;
+        return true;
       }
       const oldLine = row.oldIndex !== null ? hunk.lines[row.oldIndex] : null;
-      if (oldLine && oldLine.oldNo !== null) openComposer(row.path, "LEFT", oldLine.oldNo);
+      if (oldLine && oldLine.oldNo !== null) {
+        openComposer(row.path, "LEFT", oldLine.oldNo);
+        return true;
+      }
     }
+    return false;
   }
 
-  function toggleShortcuts() {
+  function toggleShortcuts(): boolean {
     setShortcutSheetOpen((open) => !open);
+    return true;
   }
 
   // Everything the keydown handler needs, refreshed every render so the listener (registered
   // once below) never reads stale `rows`/`cursorIndex`/`composer` or a stale closure over them.
   const keyboardRef = useRef({
-    rows,
-    cursorIndex,
     composerOpen: composer !== null,
     goToFile,
     toggleExpandCurrent,
@@ -1149,8 +1236,6 @@ export function ModuleTab(props: ModuleTabProps) {
     toggleShortcuts,
   });
   keyboardRef.current = {
-    rows,
-    cursorIndex,
     composerOpen: composer !== null,
     goToFile,
     toggleExpandCurrent,
@@ -1161,6 +1246,27 @@ export function ModuleTab(props: ModuleTabProps) {
     openComposerAtCursor,
     toggleShortcuts,
   };
+
+  // Resolves a pending `n` jump into a file that had to be expanded first (see `jumpToUnresolved`
+  // above): once that file's rows include an unresolved thread/finding — its diff may still be
+  // loading, so this can take a few `rows` rebuilds — land the cursor there and scroll it into
+  // view. A target whose header isn't in `rows` yet, or whose unresolved item hasn't rendered
+  // yet, is left pending for the next rebuild.
+  useEffect(() => {
+    const target = pendingUnresolvedTargetRef.current;
+    if (!target) return;
+    const headerIndex = rows.findIndex((row) => row.type === "fileHeader" && row.path === target);
+    if (headerIndex === -1) return;
+    const index = nextUnresolvedIndex(rows, headerIndex);
+    if (index === null) return;
+    pendingUnresolvedTargetRef.current = null;
+    const row = rows[index];
+    markKeyboardNav();
+    setCursorKey(row.key);
+    if (row.path) setCurrentPath(row.path);
+    requestScroll(index, 0.5);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
 
   useEffect(() => {
     if (props.layout.platform !== "web") return;
@@ -1173,44 +1279,48 @@ export function ModuleTab(props: ModuleTabProps) {
       if (tag === "input" || tag === "textarea" || event.target?.isContentEditable) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (actions.composerOpen) return; // Escape included: the composer's own input handles it.
+      let consumed: boolean;
       switch (event.key) {
         case "j":
-          actions.goToFile(1);
+          consumed = actions.goToFile(1);
           break;
         case "k":
-          actions.goToFile(-1);
+          consumed = actions.goToFile(-1);
           break;
         case "e":
-          actions.toggleExpandCurrent();
+          consumed = actions.toggleExpandCurrent();
           break;
         case "v":
-          actions.markCurrentViewedAndNext();
+          consumed = actions.markCurrentViewedAndNext();
           break;
         case "n":
-          actions.jumpToUnresolved();
+          consumed = actions.jumpToUnresolved();
           break;
         case "[":
-          actions.jumpHunk(-1);
+          consumed = actions.jumpHunk(-1);
           break;
         case "]":
-          actions.jumpHunk(1);
+          consumed = actions.jumpHunk(1);
           break;
         case "ArrowDown":
-          actions.moveCursorDir(1);
+          consumed = actions.moveCursorDir(1);
           break;
         case "ArrowUp":
-          actions.moveCursorDir(-1);
+          consumed = actions.moveCursorDir(-1);
           break;
         case "c":
-          actions.openComposerAtCursor();
+          consumed = actions.openComposerAtCursor();
           break;
         case "?":
-          actions.toggleShortcuts();
+          consumed = actions.toggleShortcuts();
           break;
         default:
           return;
       }
-      event.preventDefault();
+      // Only swallow the key when it actually moved/acted on something — otherwise, e.g.
+      // ArrowUp/ArrowDown at the start/end of the code rows would disable native list scrolling
+      // for no reason.
+      if (consumed) event.preventDefault();
     }
 
     doc.addEventListener("keydown", handleKeyDown);
@@ -1227,15 +1337,6 @@ export function ModuleTab(props: ModuleTabProps) {
     const first = info.viewableItems.find((v) => v.item.path);
     if (first) setCurrentPath(first.item.path);
   }).current;
-
-  // Only the render where a composer target was just opened should steal focus — see
-  // `InlineComposer`'s `autoFocus` doc comment for why (a virtualized cell remounts as it scrolls
-  // out of and back into the render window).
-  const composerKey = composer
-    ? `${composer.path}:${composer.side}:${composer.line}:${composer.mode}:${composer.mode === "editDraft" ? composer.draftId : composer.mode === "editComment" ? composer.commentId : ""}`
-    : null;
-  const composerAutoFocus = composerKey !== null && composerKey !== lastComposerKeyRef.current;
-  lastComposerKeyRef.current = composerKey;
 
   const ctx: StreamRowContext = {
     theme,
@@ -1285,7 +1386,6 @@ export function ModuleTab(props: ModuleTabProps) {
     composerBody,
     onChangeComposerBody: setComposerBody,
     composerBusy,
-    composerAutoFocus,
     onCancelComposer: closeComposer,
     onAddToReview: addToReview,
     onCommentNow: commentNow,
@@ -1293,13 +1393,16 @@ export function ModuleTab(props: ModuleTabProps) {
     onRetryDiff: (path) => diffByPath.get(path)?.refetch(),
   };
 
-  // `ctx` is a fresh object every render (it carries ~30 live callbacks), so `renderItem` can't be
-  // fully stable — but `StreamRowItem`'s own memo comparator (`rowPropsEqual`) is what actually
-  // stops a composer keystroke or a cursor move from re-rendering every visible row; this
-  // `useCallback` just avoids rebuilding the wrapper function when nothing relevant to it changed.
+  // `ctx` is a fresh object every render (it carries ~30 live callbacks), so a `useCallback(fn,
+  // [ctx])` wrapper around `renderItem` would never actually stay stable — it'd rebuild on every
+  // render just like an inline function would. Reading `ctx` from a ref instead keeps `renderItem`
+  // itself permanently stable (so FlatList never treats it as "changed"), while `StreamRowItem`'s
+  // own memo comparator (`rowPropsEqual`) remains the real guard against unnecessary row re-renders.
+  const ctxRef = useRef(ctx);
+  ctxRef.current = ctx;
   const renderItem = useCallback(
-    ({ item, index }: { item: Row; index: number }) => <StreamRowItem row={item} index={index} ctx={ctx} />,
-    [ctx],
+    ({ item, index }: { item: Row; index: number }) => <StreamRowItem row={item} index={index} ctx={ctxRef.current} />,
+    [],
   );
 
   const viewedCount = moduleFiles.filter((file) => (viewedOverride[file.path] ?? file.viewed) === "VIEWED").length;
