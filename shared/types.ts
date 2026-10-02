@@ -391,6 +391,8 @@ export const FileDiffSchema = z.object({
   binary: z.boolean(),
   truncated: z.boolean(),
   hunks: z.array(HunkSchema),
+  /** Line count of the head-side file (for context expansion below the last hunk); null when deleted, binary or unknown. */
+  totalLines: z.number().nullable(),
 });
 export type FileDiff = z.infer<typeof FileDiffSchema>;
 

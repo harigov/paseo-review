@@ -38,7 +38,7 @@ function hunk(partial: Partial<Hunk> & { lines: DiffLine[] }): Hunk {
 }
 
 function fileDiff(partial: Partial<FileDiff> & { hunks: Hunk[] }): FileDiff {
-  return { path: "a.ts", oldPath: null, binary: false, truncated: false, ...partial };
+  return { path: "a.ts", oldPath: null, binary: false, truncated: false, totalLines: null, ...partial };
 }
 
 function analyzedFile(partial: Partial<AnalyzedFile> & { path: string }): AnalyzedFile {

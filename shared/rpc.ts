@@ -126,13 +126,16 @@ export const fileDiffRpc = defineRpc({
   output: FileDiffSchema,
 });
 
+/** Maximum lines one `prr.file.lines` call returns; shared by the server cap and the client's "Expand all". */
+export const FILE_LINES_MAX = 500;
+
 /** Lines of a file at the PR head or merge base, for expanding context around a hunk. */
 export const fileLinesRpc = defineRpc({
   name: "prr.file.lines",
   input: PrRef.extend({
     path: z.string(),
     side: z.enum(["base", "head"]),
-    /** 1-based inclusive range; at most 500 lines per call. */
+    /** 1-based inclusive range; at most FILE_LINES_MAX lines per call. */
     start: z.number().int().positive(),
     end: z.number().int().positive(),
   }),

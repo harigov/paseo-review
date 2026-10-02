@@ -3,9 +3,9 @@ import { pollJob, startJob } from "../core/jobs";
 import { handle } from "../core/handle";
 import { services } from "../core/services";
 import type { AnalysisService, ValidationUnit } from "../core/services";
-import { fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
+import { FILE_LINES_MAX, fileDiffRpc, fileLinesRpc, fileMoveRpc, fileStructuralDiffRpc, jobPollRpc, prAnalysisRpc, prAnalyzeRpc } from "../../shared/rpc";
 import type { Analysis, FileDiff, PrDetail, StructuralDiff } from "../../shared/types";
-import { annotateMovesAndWhitespace, parseUnifiedDiff, toFileDiff } from "./diff";
+import { annotateMovesAndWhitespace, countLines, parseUnifiedDiff, toFileDiff } from "./diff";
 import { ensureMirror, fetchPrRefs, fetchSha, grepAtRef, mergeBase as computeMergeBase, objectExists, rawDiff, showFile } from "./git";
 import { resolveRepo, resolvePrRefs } from "./core";
 import { runAnalysisPipeline } from "./pipeline";
@@ -35,8 +35,6 @@ function cacheStructural(key: string, value: StructuralDiff): StructuralDiff {
   }
   return value;
 }
-
-const FILE_LINES_MAX = 500;
 
 async function canonicalSlug(repo: string): Promise<string> {
   try {
@@ -147,8 +145,14 @@ export function createAnalysisService(): AnalysisService {
       const parsed = parseUnifiedDiff(raw);
       annotateMovesAndWhitespace(parsed);
       const file = parsed.find((f) => f.path === filePath);
-      if (!file) return { path: filePath, oldPath: null, binary: false, truncated: false, hunks: [] };
-      return toFileDiff(file);
+      if (!file) return { path: filePath, oldPath: null, binary: false, truncated: false, hunks: [], totalLines: null };
+      // Head-side line count so the client can offer context below the last hunk without a probe.
+      let totalLines: number | null = null;
+      if (!file.binary && file.status !== "deleted") {
+        const head = await showFile(mirror, headSha, filePath);
+        totalLines = head === null ? null : countLines(head);
+      }
+      return toFileDiff(file, totalLines);
     },
 
     async getStructuralDiff(repo, number, filePath): Promise<StructuralDiff | null> {
