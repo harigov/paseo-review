@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { moveCursor, nextFileIndex, nextHunkIndex, nextUnresolvedIndex, nextUnviewedPath } from "../client/diff/keyboard";
+import { moveCursor, nextFileIndex, nextFileWithUnresolved, nextHunkIndex, nextUnresolvedIndex, nextUnviewedPath } from "../client/diff/keyboard";
+import type { UnresolvedFindingLike } from "../client/diff/keyboard";
 import type { Row } from "../client/diff/rows";
 import type { Thread } from "../shared/types";
 
@@ -150,5 +151,47 @@ describe("nextUnviewedPath", () => {
   it("returns null when every file is VIEWED", () => {
     const allViewed = files.map((f) => ({ ...f, viewed: "VIEWED" as const }));
     expect(nextUnviewedPath(allViewed, "a.ts", "foundations")).toBeNull();
+  });
+});
+
+describe("nextFileWithUnresolved", () => {
+  const files = [{ path: "a.ts" }, { path: "b.ts" }, { path: "c.ts" }];
+  const openThread = thread({ id: "t1", path: "b.ts", isResolved: false });
+  const resolvedThread = thread({ id: "t2", path: "a.ts", isResolved: true });
+  const failingFinding: UnresolvedFindingLike = { status: "fail", dismissed: false };
+  const dismissedFinding: UnresolvedFindingLike = { status: "fail", dismissed: true };
+
+  it("finds the next file (by position, not by path) with an open thread", () => {
+    const threadsByPath = new Map([["b.ts", [openThread]]]);
+    expect(nextFileWithUnresolved(files, threadsByPath, new Map(), "a.ts")).toBe("b.ts");
+  });
+
+  it("finds the next file with a failing, non-dismissed finding", () => {
+    const findingsByPath = new Map([["c.ts", [failingFinding]]]);
+    expect(nextFileWithUnresolved(files, new Map(), findingsByPath, "a.ts")).toBe("c.ts");
+  });
+
+  it("ignores resolved threads and dismissed (or merely uncertain) findings", () => {
+    const threadsByPath = new Map([["a.ts", [resolvedThread]]]);
+    const findingsByPath = new Map([
+      ["b.ts", [dismissedFinding]],
+      ["c.ts", [{ status: "uncertain", dismissed: false } as UnresolvedFindingLike]],
+    ]);
+    expect(nextFileWithUnresolved(files, threadsByPath, findingsByPath, null)).toBeNull();
+  });
+
+  it("wraps around to the start when nothing qualifies after afterPath", () => {
+    const threadsByPath = new Map([["a.ts", [openThread]]]);
+    expect(nextFileWithUnresolved(files, threadsByPath, new Map(), "b.ts")).toBe("a.ts");
+  });
+
+  it("starts from the beginning when afterPath is null or unknown", () => {
+    const findingsByPath = new Map([["a.ts", [failingFinding]]]);
+    expect(nextFileWithUnresolved(files, new Map(), findingsByPath, null)).toBe("a.ts");
+    expect(nextFileWithUnresolved(files, new Map(), findingsByPath, "missing.ts")).toBe("a.ts");
+  });
+
+  it("returns null when nothing anywhere is unresolved", () => {
+    expect(nextFileWithUnresolved(files, new Map(), new Map(), null)).toBeNull();
   });
 });

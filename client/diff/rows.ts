@@ -58,10 +58,14 @@ export type Row =
       position: ContextGapPosition;
       oldStart: number;
       newStart: number;
-      /** Lines still unfetched in this gap (what pressing "Expand" would reveal next). */
+      /** Lines still unfetched in this gap (what pressing "Expand" would reveal next); the gap's
+       * full (untouched) size when `unsafe` is true, since an unsafe gap offers no expand action. */
       count: number;
       /** Original full size of the gap, for the "Expand all" ≤ 500 rule (unaffected by partial fetches). */
       totalCount: number;
+      /** True when the gap's old/new sizes disagree (a hunk was dropped from a truncated diff):
+       * rendered as a muted, non-expandable notice instead of an "Expand" control. */
+      unsafe: boolean;
     }
   | { type: "loading"; key: string; path: string }
   | { type: "error"; key: string; path: string; message: string; tone: "danger" | "muted" }
@@ -251,12 +255,30 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
   // it's adjacent to. Rows below interleave: (above only) a placeholder for whatever's still
   // unfetched, nearest the top of the file → fetched context lines, nearest the hunk → the hunk
   // itself → (last hunk only) fetched "below" context lines → a placeholder for whatever's left.
-  const gaps = gapsForFile(diff.hunks, input.totalLines);
+  const gaps = gapsForFile(diff.hunks, input.totalLines, diff.truncated);
   const gapByKey = new Map<string, ContextGap>(gaps.map((gap) => [`${gap.position}:${gap.hunkIndex}`, gap]));
   const merged = mergeContextLines(diff.hunks, input.contextLines);
 
   function pushExpandRow(position: ContextGapPosition, hunkIndex: number, oldStart: number, newStart: number, count: number, totalCount: number): void {
-    rows.push({ type: "expandContext", key: `${path}:expand:${position}:${hunkIndex}`, path, hunkIndex, position, oldStart, newStart, count, totalCount });
+    rows.push({ type: "expandContext", key: `${path}:expand:${position}:${hunkIndex}`, path, hunkIndex, position, oldStart, newStart, count, totalCount, unsafe: false });
+  }
+
+  /** An "unsafe" gap (see `ContextGap.unsafe`) offers no expand action — just a muted notice —
+   * so it's rendered with the gap's full, untouched size regardless of anything fetched so far
+   * (nothing can have been fetched for it: the UI never offers a way to request it). */
+  function pushUnsafeGapRow(position: ContextGapPosition, hunkIndex: number, gap: ContextGap): void {
+    rows.push({
+      type: "expandContext",
+      key: `${path}:expand:${position}:${hunkIndex}`,
+      path,
+      hunkIndex,
+      position,
+      oldStart: gap.oldStart,
+      newStart: gap.newStart,
+      count: gap.count,
+      totalCount: gap.count,
+      unsafe: true,
+    });
   }
 
   function pushContextRun(hunkIndex: number, lines: DiffLine[], baseIndex: number): void {
@@ -275,20 +297,30 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
     const isFirst = hunkIndex === 0;
     const isLast = hunkIndex === diff.hunks.length - 1;
     const { prepend, append } = merged[hunkIndex];
+    const collapsible = hunk.pureMove || hunk.whitespaceOnly;
+    const hunkExpanded = input.expandedHunks.has(hunkIndex);
+    // Context lines (and their expand/unsafe placeholders) adjacent to a still-collapsed hunk
+    // aren't rendered at all: `ModuleTab`'s per-hunk highlighting/intraline caches skip tokenizing
+    // a collapsed hunk entirely (there's nothing worth paying for until the user expands it), so
+    // showing fetched context lines here would render as plain, unhighlighted text. They reappear
+    // once the hunk itself is expanded, exactly like the hunk's own lines do.
+    const showContext = !collapsible || hunkExpanded;
 
     const gapBefore = gapByKey.get(`${isFirst ? "above" : "between"}:${hunkIndex}`);
     const remainingBefore = gapBefore ? gapBefore.count - prepend.length : 0;
 
-    if (isFirst && gapBefore && remainingBefore > 0) {
-      pushExpandRow("above", hunkIndex, gapBefore.oldStart, gapBefore.newStart, remainingBefore, gapBefore.count);
+    if (isFirst && gapBefore && showContext) {
+      if (gapBefore.unsafe) pushUnsafeGapRow("above", hunkIndex, gapBefore);
+      else if (remainingBefore > 0) pushExpandRow("above", hunkIndex, gapBefore.oldStart, gapBefore.newStart, remainingBefore, gapBefore.count);
     }
-    pushContextRun(hunkIndex, prepend, 0);
-    if (!isFirst && gapBefore && remainingBefore > 0) {
-      pushExpandRow("between", hunkIndex, gapBefore.oldStart + prepend.length, gapBefore.newStart + prepend.length, remainingBefore, gapBefore.count);
+    if (showContext) pushContextRun(hunkIndex, prepend, 0);
+    if (!isFirst && gapBefore && showContext) {
+      if (gapBefore.unsafe) pushUnsafeGapRow("between", hunkIndex, gapBefore);
+      else if (remainingBefore > 0)
+        pushExpandRow("between", hunkIndex, gapBefore.oldStart + prepend.length, gapBefore.newStart + prepend.length, remainingBefore, gapBefore.count);
     }
 
-    const collapsible = hunk.pureMove || hunk.whitespaceOnly;
-    if (collapsible && !input.expandedHunks.has(hunkIndex)) {
+    if (collapsible && !hunkExpanded) {
       rows.push({
         type: "collapsed",
         key: `${path}:collapsed:${hunkIndex}`,
@@ -326,12 +358,13 @@ function buildFileRows(input: StreamFileInput, split: boolean, composer: Compose
       }
     }
 
-    if (isLast) {
+    if (isLast && showContext) {
       pushContextRun(hunkIndex, append, prepend.length + hunk.lines.length);
       const gapAfter = gapByKey.get(`below:${hunkIndex}`);
       const remainingAfter = gapAfter ? gapAfter.count - append.length : 0;
-      if (gapAfter && remainingAfter > 0) {
-        pushExpandRow("below", hunkIndex, gapAfter.oldStart + append.length, gapAfter.newStart + append.length, remainingAfter, gapAfter.count);
+      if (gapAfter) {
+        if (gapAfter.unsafe) pushUnsafeGapRow("below", hunkIndex, gapAfter);
+        else if (remainingAfter > 0) pushExpandRow("below", hunkIndex, gapAfter.oldStart + append.length, gapAfter.newStart + append.length, remainingAfter, gapAfter.count);
       }
     }
   });

@@ -4,12 +4,13 @@ import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { HighlightToken } from "@getpaseo/highlight";
 import type { AnalyzedFile, DiffLine, Hunk, OutlineEntry, Thread } from "../../shared/types";
+import { FILE_LINES_MAX } from "../../shared/rpc";
 import type { DraftComment } from "../review/drafts";
 import { Chip, riskColor } from "../ui/chips";
 import { EmptyState, ErrorState, Skeleton } from "../ui/states";
 import { code as codeByDensity, font, radius, space, surfaces, withAlpha, type DiffDensity } from "../ui/tokens";
 import { Markdown } from "../render/Markdown";
-import type { ContextGapPosition } from "./context";
+import { CONTEXT_PAGE_SIZE, type ContextGapPosition } from "./context";
 import { applySpansToTokens, type Span } from "./intraline";
 import { OutlineView } from "./OutlineView";
 import { StructuralDiffView } from "./StructuralDiffView";
@@ -93,9 +94,6 @@ export interface StreamRowContext {
   composerBody: string;
   onChangeComposerBody(text: string): void;
   composerBusy: boolean;
-  /** Only true on the render where this composer target was just opened — see `InlineComposer`'s
-   * `autoFocus` doc comment for why a virtualized cell can't just hardcode it. */
-  composerAutoFocus: boolean;
   onCancelComposer(): void;
   onAddToReview(): void;
   onCommentNow(): void;
@@ -407,15 +405,25 @@ function renderOutline(row: Extract<Row, { type: "outline" }>, ctx: StreamRowCon
   );
 }
 
-function renderThread(row: Extract<Row, { type: "thread" }>, ctx: StreamRowContext): ReactElement | null {
+function renderThread(row: Extract<Row, { type: "thread" }>, index: number, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const thread = row.thread;
   const target = thread.line ?? thread.originalLine;
   const side = thread.diffSide;
   const replyOpen = ctx.isReplyOpen(thread.id);
   const sending = ctx.sendingReplyId === thread.id;
+  const isCursor = ctx.cursorIndex === index;
   return (
-    <View style={{ padding: space.sm, paddingLeft: space.lg, backgroundColor: c.surface1, gap: space.xs }}>
+    <View
+      style={{
+        padding: space.sm,
+        paddingLeft: space.lg,
+        backgroundColor: c.surface1,
+        gap: space.xs,
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
+    >
       <View style={{ flexDirection: "row", gap: space.xs, alignItems: "center" }}>
         <Icon name="MessageCircle" size={12} color={c.foregroundMuted} />
         <Text style={{ ...font.caption, color: c.foregroundMuted }}>
@@ -495,10 +503,22 @@ function renderDraft(row: Extract<Row, { type: "draft" }>, ctx: StreamRowContext
   );
 }
 
-function renderFinding(row: Extract<Row, { type: "finding" }>, ctx: StreamRowContext): ReactElement | null {
+function renderFinding(row: Extract<Row, { type: "finding" }>, index: number, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
+  const isCursor = ctx.cursorIndex === index;
   return (
-    <View style={{ padding: 6, paddingLeft: space.lg, backgroundColor: c.surface1, flexDirection: "row", gap: space.xs, alignItems: "center" }}>
+    <View
+      style={{
+        padding: 6,
+        paddingLeft: space.lg,
+        backgroundColor: c.surface1,
+        flexDirection: "row",
+        gap: space.xs,
+        alignItems: "center",
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
+    >
       <Text style={{ ...font.caption, color: c.statusDanger }}>
         ✗ {row.finding.validatorTitle} {Math.round(row.finding.probability * 100)}%
       </Text>
@@ -507,6 +527,11 @@ function renderFinding(row: Extract<Row, { type: "finding" }>, ctx: StreamRowCon
 }
 
 function renderComposer(row: Extract<Row, { type: "composer" }>, ctx: StreamRowContext): ReactElement | null {
+  // Identifies this specific composer target (distinct from the row's own FlatList `key`, which
+  // is only `${path}:composer` — the same list key is reused when the composer moves to a
+  // different line/mode on the same path — so `InlineComposer` can tell "freshly opened" apart
+  // from "re-rendered for an unrelated reason" and steal focus only on the former.
+  const targetKey = `${row.path}:${row.side}:${row.line}:${row.mode}:${row.mode === "editDraft" ? row.draftId : row.mode === "editComment" ? row.commentId : ""}`;
   return (
     <InlineComposer
       theme={ctx.theme}
@@ -518,17 +543,26 @@ function renderComposer(row: Extract<Row, { type: "composer" }>, ctx: StreamRowC
       onAddToReview={ctx.onAddToReview}
       onCommentNow={ctx.onCommentNow}
       onSave={ctx.onSaveComposer}
-      autoFocus={ctx.composerAutoFocus}
+      targetKey={targetKey}
     />
   );
 }
 
-function renderHunkHeader(row: Extract<Row, { type: "hunkHeader" }>, ctx: StreamRowContext): ReactElement | null {
+function renderHunkHeader(row: Extract<Row, { type: "hunkHeader" }>, index: number, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
   const code = codeByDensity[ctx.density];
   const label = formatHunkHeader(row.context, row.newStart, row.newEnd);
+  const isCursor = ctx.cursorIndex === index;
   return (
-    <View style={{ minHeight: 26, backgroundColor: c.surface1, justifyContent: "center" }}>
+    <View
+      style={{
+        minHeight: 26,
+        backgroundColor: c.surface1,
+        justifyContent: "center",
+        borderLeftWidth: 2,
+        borderLeftColor: isCursor ? c.accent : "transparent",
+      }}
+    >
       <Text style={{ ...codeTextStyle(code), fontSize: 11, color: c.foregroundMuted, paddingHorizontal: space.sm }}>{label}</Text>
     </View>
   );
@@ -550,14 +584,19 @@ function renderCollapsed(row: Extract<Row, { type: "collapsed" }>, ctx: StreamRo
   );
 }
 
-const EXPAND_ALL_MAX = 500;
-
 function renderExpandContext(row: Extract<Row, { type: "expandContext" }>, ctx: StreamRowContext): ReactElement | null {
   const c = ctx.theme.colors;
+  if (row.unsafe) {
+    return (
+      <View style={{ minHeight: 24, backgroundColor: c.surface1, justifyContent: "center", paddingHorizontal: space.sm }}>
+        <Text style={{ ...font.caption, color: c.foregroundMuted }}>{row.count} line{row.count === 1 ? "" : "s"} not shown (diff truncated)</Text>
+      </View>
+    );
+  }
   const busyKey = `${row.path}:${row.position}:${row.hunkIndex}`;
   const busy = ctx.contextPending.has(busyKey);
-  const nextPress = Math.min(20, row.count);
-  const showExpandAll = row.totalCount <= EXPAND_ALL_MAX && row.count > nextPress;
+  const nextPress = Math.min(CONTEXT_PAGE_SIZE, row.count);
+  const showExpandAll = row.totalCount <= FILE_LINES_MAX && row.count > nextPress;
   return (
     <View style={{ minHeight: 24, backgroundColor: c.surface1, flexDirection: "row", alignItems: "center", gap: space.md, paddingHorizontal: space.sm }}>
       <Pressable
@@ -645,7 +684,7 @@ export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext):
     case "truncated":
       return renderTruncated(ctx);
     case "hunkHeader":
-      return renderHunkHeader(row, ctx);
+      return renderHunkHeader(row, index, ctx);
     case "collapsed":
       return renderCollapsed(row, ctx);
     case "line":
@@ -653,9 +692,9 @@ export function renderStreamRow(row: Row, index: number, ctx: StreamRowContext):
     case "pair":
       return renderPairRow(row, index, ctx);
     case "thread":
-      return renderThread(row, ctx);
+      return renderThread(row, index, ctx);
     case "finding":
-      return renderFinding(row, ctx);
+      return renderFinding(row, index, ctx);
     case "draft":
       return renderDraft(row, ctx);
     case "composer":

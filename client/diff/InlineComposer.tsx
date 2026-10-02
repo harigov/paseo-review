@@ -1,5 +1,6 @@
+import { useEffect, useRef } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
-import type { NativeSyntheticEvent, TextInputKeyPressEventData } from "react-native";
+import type { NativeSyntheticEvent, TextInput as NativeTextInput, TextInputKeyPressEventData } from "react-native";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import type { ComposerMode } from "./rows";
@@ -19,7 +20,7 @@ export function InlineComposer({
   onAddToReview,
   onCommentNow,
   onSave,
-  autoFocus = true,
+  targetKey,
 }: {
   theme: Theme;
   mode: ComposerMode;
@@ -30,14 +31,28 @@ export function InlineComposer({
   onAddToReview: () => void;
   onCommentNow: () => void;
   onSave: () => void;
-  /** Only the composer's first mount (for a given target) should steal focus — a virtualized
-   * list cell can unmount and remount as it scrolls out of and back into the render window, and
-   * re-focusing on every one of those remounts would steal focus/scroll out from under the user. */
-  autoFocus?: boolean;
+  /** Identifies this composer's target (path/side/line/mode/draft-or-comment id). Used to decide
+   * when to steal focus: only the first mount *for a given target* should do so. A virtualized
+   * list cell can unmount and remount as it scrolls out of and back into the render window, so
+   * that decision can't be made once at the call site during render (comparing against a ref
+   * mutated in the parent's render body breaks under StrictMode's double-render — a throwaway
+   * render would mutate the ref before the committed render ever reads it). Doing it here, in a
+   * mount-time effect scoped to this component instance, means a remount (fresh instance, fresh
+   * ref) still focuses once, while a same-instance re-render for an unrelated reason (the target
+   * key unchanged) does not steal focus again. */
+  targetKey: string;
 }) {
   const c = theme.colors;
   const s = surfaces(c);
   const disabled = busy || !body.trim();
+  const inputRef = useRef<NativeTextInput | null>(null);
+  const focusedTargetRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (focusedTargetRef.current === targetKey) return;
+    focusedTargetRef.current = targetKey;
+    inputRef.current?.focus();
+  }, [targetKey]);
 
   function handleKeyPress(e: NativeSyntheticEvent<TextInputKeyPressEventData>) {
     if (Platform.OS === "web" && e.nativeEvent.key === "Escape") onCancel();
@@ -46,12 +61,12 @@ export function InlineComposer({
   return (
     <View style={{ padding: space.sm, paddingLeft: space.lg, backgroundColor: c.surface1, gap: space.sm }}>
       <TextInput
+        ref={inputRef}
         value={body}
         onChangeText={onChangeBody}
         onKeyPress={handleKeyPress}
         placeholder="Leave a comment…"
         multiline
-        autoFocus={autoFocus}
         style={{ ...s.input, minHeight: 90 }}
       />
       <Text style={{ ...font.caption, color: c.foregroundMuted }}>Markdown supported</Text>

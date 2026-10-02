@@ -9,6 +9,9 @@ import type { DiffLine, Hunk } from "../../shared/types";
 
 export type ContextGapPosition = "above" | "below" | "between";
 
+/** `prr.file.lines` lines fetched per "Expand" press; shared with `ModuleTab` and `DiffRows`. */
+export const CONTEXT_PAGE_SIZE = 20;
+
 /** One gap in a file's visible lines, independent of how much of it has already been fetched. */
 export interface ContextGap {
   position: ContextGapPosition;
@@ -20,6 +23,12 @@ export interface ContextGap {
   newStart: number;
   /** Total size of the gap, old and new (a gap has no changes, so both sides are equal length). */
   count: number;
+  /** True when the old- and new-side sizes computed for this gap disagree because a hunk was
+   * dropped from a truncated diff: the hunks on either side no longer account for every line
+   * between them, so fetching "context" here could actually surface the dropped hunk's changed
+   * lines mislabeled as unchanged. Rendered as a muted, non-expandable notice instead of an
+   * "Expand" control. */
+  unsafe: boolean;
 }
 
 /** Last old/new line number a hunk actually covers (inclusive). Unified-diff convention points
@@ -34,15 +43,24 @@ function coveredEnd(start: number, lines: number): number {
  * The full set of gaps for a file's hunks: "above" the first hunk, "between" consecutive hunks,
  * and (when `totalLines` is known) "below" the last hunk through the end of the file. Pass
  * `totalLines` as `null` when it isn't known yet (not fetched) or doesn't apply (deleted file) —
- * the "below" gap is omitted in that case, since its size can't be computed without it.
+ * the "below" gap is omitted in that case, since its size can't be computed without it. Pass
+ * `truncated` (the file diff's own `truncated` flag) so a "between" gap whose old/new sizes
+ * disagree — the signature of a hunk having been dropped for being over the size budget — can be
+ * flagged `unsafe` instead of silently mis-sizing the gap (see `ContextGap.unsafe`).
  */
-export function gapsForFile(hunks: Hunk[], totalLines: number | null): ContextGap[] {
+export function gapsForFile(hunks: Hunk[], totalLines: number | null, truncated = false): ContextGap[] {
   const gaps: ContextGap[] = [];
 
   hunks.forEach((hunk, hunkIndex) => {
     if (hunkIndex === 0) {
-      if (hunk.oldStart > 1) {
-        gaps.push({ position: "above", hunkIndex, oldStart: 1, newStart: 1, count: hunk.oldStart - 1 });
+      // Sized from the new side, matching `mergeContextLines`'s first-hunk boundary (`hunk.newStart`)
+      // rather than the old side: for a pure-insertion/deletion first hunk, `oldStart`/`newStart`
+      // diverge (one side's anchor convention points at a line the other side doesn't have), and
+      // only the new-side count matches what can actually be fetched (`prr.file.lines` reads the
+      // head/new-side file) — using the old side either strands an unreachable last line or leaves
+      // a remaining count merge can never satisfy.
+      if (hunk.newStart > 1) {
+        gaps.push({ position: "above", hunkIndex, oldStart: 1, newStart: 1, count: hunk.newStart - 1, unsafe: false });
       }
       return;
     }
@@ -51,7 +69,13 @@ export function gapsForFile(hunks: Hunk[], totalLines: number | null): ContextGa
     const newStart = coveredEnd(prev.newStart, prev.newLines) + 1;
     const count = hunk.oldStart - oldStart;
     if (count > 0) {
-      gaps.push({ position: "between", hunkIndex, oldStart, newStart, count });
+      // In an untruncated diff the old- and new-side counts always agree (a gap has no changes,
+      // so it's the same length on both sides); a disagreement only happens when a hunk was
+      // dropped from a truncated diff, leaving the visible hunks' line numbers unable to account
+      // for every line between them.
+      const newCount = hunk.newStart - newStart;
+      const unsafe = truncated && count !== newCount;
+      gaps.push({ position: "between", hunkIndex, oldStart, newStart, count, unsafe });
     }
   });
 
@@ -61,7 +85,7 @@ export function gapsForFile(hunks: Hunk[], totalLines: number | null): ContextGa
     const newStart = coveredEnd(last.newStart, last.newLines) + 1;
     const count = totalLines - newStart + 1;
     if (count > 0) {
-      gaps.push({ position: "below", hunkIndex: hunks.length - 1, oldStart, newStart, count });
+      gaps.push({ position: "below", hunkIndex: hunks.length - 1, oldStart, newStart, count, unsafe: false });
     }
   }
 
@@ -123,7 +147,8 @@ export function mergeContextLines(hunks: Hunk[], fetched: ReadonlyMap<number, st
   return hunks.map((hunk, hunkIndex) => {
     let prepend: DiffLine[];
     if (hunkIndex === 0) {
-      prepend = hunk.oldStart > 1 ? collectSuffix(fetched, 1, hunk.newStart, 1) : [];
+      // Gated on the new side, matching `gapsForFile`'s first-hunk convention above.
+      prepend = hunk.newStart > 1 ? collectSuffix(fetched, 1, hunk.newStart, 1) : [];
     } else {
       const prev = hunks[hunkIndex - 1];
       const oldStart = coveredEnd(prev.oldStart, prev.oldLines) + 1;
