@@ -91,6 +91,19 @@ describe("findAssetFile", () => {
     expect(found).toBe(path.join(newer, "mermaid.min.js"));
   });
 
+  it("finds the plugin checkout when the bundle has no __dirname", () => {
+    const cwdRoot = tempDir("pr-review-assets-empty-cwd-");
+    const paseoHome = tempDir("pr-review-assets-home-");
+    const assetDir = path.join(paseoHome, "plugins", "pr-review", "checkout-uuid", "checkout", "node_modules", "mermaid", "dist");
+    mkdirSync(assetDir, { recursive: true });
+    writeFileSync(path.join(assetDir, "mermaid.min.js"), "window.mermaid = {};");
+
+    // `null` is what Paseo's eval'd server bundle looks like: `__dirname` is not defined, so the
+    // lookup must not throw and must still reach the installed checkout.
+    const found = findAssetFile("mermaid", { dirnameRoot: null, cwdRoot, paseoHome });
+    expect(found).toBe(path.join(assetDir, "mermaid.min.js"));
+  });
+
   it("returns null when the asset exists nowhere in any candidate location", () => {
     const dirnameRoot = tempDir("pr-review-assets-empty-dirname-");
     const cwdRoot = tempDir("pr-review-assets-empty-cwd-");

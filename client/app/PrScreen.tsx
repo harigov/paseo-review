@@ -65,6 +65,8 @@ export function PrScreen(
   const [initializedReadingOrder, setInitializedReadingOrder] = useState(false);
   const [statusOpen, setStatusOpen] = useState(true);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [reviewOpenRequest, setReviewOpenRequest] = useState(0);
   // Right column content on wide layouts; the chat panel stays mounted once opened so its
   // agent subscription and message list survive switching back to Status.
   const [panelTab, setPanelTab] = useState<"status" | "chat">("status");
@@ -215,7 +217,15 @@ export function PrScreen(
   const validatorFailCount = analysis?.validators.filter((v) => v.status === "fail").length ?? 0;
   const unresolvedThreads = detail?.threads.filter((t) => !t.isResolved).length ?? 0;
 
-  type TabEntry = { id: string; label: string; badge?: string; riskColor?: string; progress?: { viewed: number; total: number } };
+  type TabEntry = {
+    id: string;
+    label: string;
+    badge?: string;
+    riskColor?: string;
+    progress?: { viewed: number; total: number };
+    /** Present on module tabs: how much code that module changes. */
+    code?: { additions: number; deletions: number };
+  };
   const tabs: TabEntry[] = [
     { id: "overview", label: "Overview" },
     ...moduleTabs.map((m) => ({
@@ -223,6 +233,7 @@ export function PrScreen(
       label: m.title,
       riskColor: riskColor(m.maxRisk, c),
       progress: { viewed: m.viewedFiles, total: m.fileCount },
+      code: { additions: m.additions, deletions: m.deletions },
     })),
     { id: "validators", label: "Validators", badge: validatorFailCount > 0 ? String(validatorFailCount) : undefined },
     { id: "conversations", label: "Conversations", badge: unresolvedThreads > 0 ? String(unresolvedThreads) : undefined },
@@ -288,10 +299,10 @@ export function PrScreen(
       style={
         layout.compact
           ? { flexDirection: "row" }
-          : { width: 220, borderRightWidth: 1, borderColor: c.border }
+          : { width: 300, borderRightWidth: 1, borderColor: c.border }
       }
     >
-      <ScrollView horizontal={layout.compact} contentContainerStyle={{ padding: space.sm, gap: space.xs }}>
+      <ScrollView horizontal={layout.compact} contentContainerStyle={{ padding: space.md, gap: space.sm }}>
         {tabs.map((tab, i) => {
           const isModule = tab.progress !== undefined;
           const prevIsModule = i > 0 ? tabs[i - 1].progress !== undefined : false;
@@ -301,32 +312,45 @@ export function PrScreen(
               {isModule && !prevIsModule && (
                 <>
                   <View style={{ ...s.hairline, marginVertical: space.xs }} />
-                  <Text style={{ ...font.caption, color: c.foregroundMuted, paddingHorizontal: 10, paddingBottom: 4 }}>Modules</Text>
+                  <Text style={{ ...font.small, color: c.foregroundMuted, paddingHorizontal: 12, paddingBottom: 6 }}>Modules</Text>
                 </>
               )}
               {!isModule && prevIsModule && <View style={{ ...s.hairline, marginVertical: space.xs }} />}
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={tab.progress ? `${tab.label}, ${tab.progress.viewed} of ${tab.progress.total} files viewed` : tab.label}
+                accessibilityLabel={
+                  tab.code && tab.progress
+                    ? `${tab.label}, +${tab.code.additions} −${tab.code.deletions}, ${tab.progress.viewed} of ${tab.progress.total} files viewed`
+                    : tab.label
+                }
                 onPress={() => selectTab(tab.id)}
                 style={({ pressed }) => ({
                   flexDirection: "row",
                   alignItems: "center",
-                  gap: space.xs,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
+                  gap: space.sm,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
                   borderRadius: radius.md,
                   backgroundColor: activeTab === tab.id ? c.surface2 : pressed ? c.surface1 : "transparent",
                 })}
               >
-                {tab.riskColor && <Dot color={tab.riskColor} />}
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text numberOfLines={1} style={{ ...font.small, color: activeTab === tab.id ? c.foreground : c.foregroundMuted }}>
+                {tab.riskColor && <Dot color={tab.riskColor} size={8} />}
+                <View style={{ flex: 1, gap: 4 }}>
+                  <Text numberOfLines={1} style={{ ...font.body, fontWeight: activeTab === tab.id ? "600" : "400", color: activeTab === tab.id ? c.foreground : c.foregroundMuted }}>
                     {tab.label}
                   </Text>
+                  {tab.code && tab.progress && (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <Text style={{ ...font.small, color: c.statusSuccess }}>+{tab.code.additions.toLocaleString()}</Text>
+                      <Text style={{ ...font.small, color: c.statusDanger }}>−{tab.code.deletions.toLocaleString()}</Text>
+                      <Text style={{ ...font.small, color: c.foregroundMuted }}>
+                        {tab.progress.viewed} of {tab.progress.total} viewed
+                      </Text>
+                    </View>
+                  )}
                   {tab.progress && (
-                    <View style={{ height: 3, borderRadius: 1.5, backgroundColor: c.surface2, overflow: "hidden" }}>
-                      <View style={{ height: 3, width: `${pct}%`, borderRadius: 1.5, backgroundColor: c.accent }} />
+                    <View style={{ height: 4, borderRadius: 2, backgroundColor: c.surface2, overflow: "hidden" }}>
+                      <View style={{ height: 4, width: `${pct}%`, borderRadius: 2, backgroundColor: c.accent }} />
                     </View>
                   )}
                 </View>
@@ -359,24 +383,21 @@ export function PrScreen(
             </Pressable>
           )}
         </View>
-        <Text style={{ ...font.small, color: c.foregroundMuted }}>
+        <Text style={{ ...font.body, color: c.foregroundMuted }}>
           {repo}#{number} · {summary.state}
           {summary.isDraft ? " · Draft" : ""} · {summary.baseRef} ← {summary.headRef}
         </Text>
 
         {analysis && (
           <View style={{ gap: space.xs }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-              <Text style={{ ...font.small, color: c.foregroundMuted, flex: 1 }}>
-                {viewedFileCount} of {totalFileCount} files viewed · {drafts.length} draft{drafts.length === 1 ? "" : "s"}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+              <Text style={{ ...font.body, color: c.foregroundMuted }}>
+                {viewedFileCount} of {totalFileCount} files viewed ·
               </Text>
-              <Pressable
-                accessibilityRole="button"
-                disabled={!nextUnviewed}
-                onPress={goToNextUnviewed}
-                style={{ ...s.buttonQuiet, opacity: nextUnviewed ? 1 : 0.5 }}
-              >
-                <Text style={s.buttonQuietText}>{nextUnviewed ? "Next unviewed" : "All files viewed"}</Text>
+              <Pressable accessibilityRole="button" onPress={() => setReviewOpenRequest((n) => n + 1)}>
+                <Text style={{ ...font.body, color: c.accent, textDecorationLine: "underline" }}>
+                  {drafts.length} draft{drafts.length === 1 ? "" : "s"}
+                </Text>
               </Pressable>
             </View>
             <View style={{ height: 4, borderRadius: 2, backgroundColor: c.surface2, overflow: "hidden" }}>
@@ -394,24 +415,8 @@ export function PrScreen(
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" }}>
           <Pressable accessibilityRole="button" onPress={() => void openExternalUrl(summary.url)}>
-            <Text style={{ ...font.small, color: c.accent }}>Open on GitHub</Text>
+            <Text style={{ ...font.body, color: c.accent }}>Open on GitHub</Text>
           </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setReadingOrder((cur) => READING_ORDERS[(READING_ORDERS.findIndex((o) => o.id === cur) + 1) % READING_ORDERS.length].id)}
-            style={s.pill(false)}
-          >
-            <Text style={s.pillText(false)}>{READING_ORDERS.find((o) => o.id === readingOrder)?.label}</Text>
-          </Pressable>
-          {!layout.compact && (
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setDiffLayout((cur) => (cur === "inline" ? "split" : "inline"))}
-              style={s.pill(false)}
-            >
-              <Text style={s.pillText(false)}>{diffLayout === "inline" ? "Inline diff" : "Split diff"}</Text>
-            </Pressable>
-          )}
           {layout.compact && (
             <Pressable accessibilityRole="button" onPress={() => setStatusModalOpen(true)} style={s.pill(false)}>
               <Text style={s.pillText(false)}>Status</Text>
@@ -425,15 +430,91 @@ export function PrScreen(
           >
             <Text style={s.pillText(sinceLastReview)}>Since my last review</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" onPress={() => openChat()} style={s.pill(false)}>
-            <Text style={s.pillText(false)}>Chat</Text>
-          </Pressable>
-          <Pressable accessibilityRole="button" disabled={analyzeRunner.running} onPress={reanalyze} style={s.pill(false)}>
-            <Text style={s.pillText(false)}>{analyzeRunner.running ? "Analyzing…" : "Re-analyze"}</Text>
+          <Pressable accessibilityRole="button" onPress={() => setViewOpen(true)} style={s.pill(false)}>
+            <Text style={s.pillText(false)}>View</Text>
           </Pressable>
           <View style={{ flex: 1 }} />
-          <ReviewSubmitButton {...ctx} />
+          {analysis && (
+            <Pressable
+              accessibilityRole="button"
+              disabled={!nextUnviewed}
+              onPress={goToNextUnviewed}
+              style={{ ...s.buttonQuiet, opacity: nextUnviewed ? 1 : 0.5 }}
+            >
+              <Text style={s.buttonQuietText}>{nextUnviewed ? "Next unviewed" : "All files viewed"}</Text>
+            </Pressable>
+          )}
+          <ReviewSubmitButton {...ctx} openRequest={reviewOpenRequest} />
         </View>
+        <Modal title="View" open={viewOpen} onOpenChange={setViewOpen}>
+          <Modal.Content>
+            <View style={{ gap: space.lg }}>
+              <View style={{ gap: space.xs }}>
+                <Text style={{ ...font.small, color: c.foregroundMuted }}>Reading order</Text>
+                {READING_ORDERS.map((order) => {
+                  const selected = readingOrder === order.id;
+                  return (
+                    <Pressable
+                      key={order.id}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      onPress={() => setReadingOrder(order.id)}
+                      style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 8 }}
+                    >
+                      <View style={{ width: 16, alignItems: "center" }}>{selected ? <Icon name="Check" size={14} color={c.accent} /> : null}</View>
+                      <Text style={{ ...font.body, fontWeight: selected ? weight.semibold : weight.regular, color: c.foreground }}>{order.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {!layout.compact && (
+                <View style={{ gap: space.xs }}>
+                  <Text style={{ ...font.small, color: c.foregroundMuted }}>Diff</Text>
+                  {(["inline", "split"] as const).map((layoutId) => {
+                    const selected = diffLayout === layoutId;
+                    return (
+                      <Pressable
+                        key={layoutId}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected }}
+                        onPress={() => setDiffLayout(layoutId)}
+                        style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 8 }}
+                      >
+                        <View style={{ width: 16, alignItems: "center" }}>{selected ? <Icon name="Check" size={14} color={c.accent} /> : null}</View>
+                        <Text style={{ ...font.body, fontWeight: selected ? weight.semibold : weight.regular, color: c.foreground }}>
+                          {layoutId === "inline" ? "Inline diff" : "Split diff"}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setViewOpen(false);
+                    openChat();
+                  }}
+                  style={s.buttonQuiet}
+                >
+                  <Text style={s.buttonQuietText}>Chat</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={analyzeRunner.running}
+                  onPress={() => {
+                    setViewOpen(false);
+                    reanalyze();
+                  }}
+                  style={{ ...s.buttonQuiet, opacity: analyzeRunner.running ? 0.5 : 1 }}
+                >
+                  <Text style={s.buttonQuietText}>{analyzeRunner.running ? "Analyzing…" : "Re-analyze"}</Text>
+                </Pressable>
+              </View>
+            </View>
+          </Modal.Content>
+        </Modal>
         {analyzeRunner.running ? (
           <InlineLoading
             theme={theme}
@@ -451,7 +532,7 @@ export function PrScreen(
         {TabRail}
         <View style={{ flex: 1 }}>{renderTabContent()}</View>
         {!layout.compact && statusOpen && (
-          <View style={{ width: panelTab === "chat" ? 340 : 280, borderLeftWidth: 1, borderColor: c.border }}>
+          <View style={{ width: panelTab === "chat" ? 440 : 380, borderLeftWidth: 1, borderColor: c.border }}>
             <View style={{ flexDirection: "row", borderBottomWidth: 1, borderColor: c.border }}>
               {(["status", "chat"] as const).map((tab) => (
                 <Pressable
@@ -464,12 +545,12 @@ export function PrScreen(
                   style={{
                     flex: 1,
                     alignItems: "center",
-                    paddingVertical: 8,
+                    paddingVertical: 12,
                     borderBottomWidth: 2,
                     borderBottomColor: panelTab === tab ? c.accent : "transparent",
                   }}
                 >
-                  <Text style={{ ...font.small, fontWeight: weight.semibold, color: panelTab === tab ? c.foreground : c.foregroundMuted }}>
+                  <Text style={{ ...font.body, fontWeight: weight.semibold, color: panelTab === tab ? c.foreground : c.foregroundMuted }}>
                     {tab === "status" ? "Status" : "Chat"}
                   </Text>
                 </Pressable>

@@ -10,14 +10,14 @@ export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 } as const;
 
 export const radius = { sm: 4, md: 6, lg: 8, xl: 10, pill: 999 } as const;
 
-/** Type scale. Nothing in the UI should be smaller than `caption` (11px). */
+/** Type scale. Nothing in the UI should be smaller than `caption` (12px). */
 export const font = {
-  caption: { fontSize: 11, lineHeight: 16 },
-  small: { fontSize: 12, lineHeight: 17 },
-  body: { fontSize: 13, lineHeight: 19 },
-  bodyLg: { fontSize: 14, lineHeight: 21 },
-  title: { fontSize: 15, lineHeight: 21, fontWeight: "600" as const },
-  heading: { fontSize: 17, lineHeight: 23, fontWeight: "700" as const },
+  caption: { fontSize: 12, lineHeight: 17 },
+  small: { fontSize: 13, lineHeight: 18 },
+  body: { fontSize: 15, lineHeight: 22 },
+  bodyLg: { fontSize: 16, lineHeight: 23 },
+  title: { fontSize: 18, lineHeight: 24, fontWeight: "600" as const },
+  heading: { fontSize: 22, lineHeight: 28, fontWeight: "700" as const },
 } as const;
 
 export const weight = { regular: "400", medium: "500", semibold: "600", bold: "700" } as const;
@@ -33,25 +33,25 @@ export type DiffDensity = keyof typeof code;
 export function surfaces(c: ThemeColors) {
   return {
     /** A grouped block on the page background. */
-    card: { backgroundColor: c.surface1, borderRadius: radius.lg, padding: space.md },
+    card: { backgroundColor: c.surface1, borderRadius: radius.lg, padding: space.lg },
     /** A block that must stand out from a card (e.g. selected, or nested in a card). */
     raised: { backgroundColor: c.surface2, borderRadius: radius.lg, padding: space.md },
     /** A thin separator between rows inside a card or list. */
     hairline: { height: 1, backgroundColor: c.border, opacity: 0.6 },
     /** Toggle / filter pill. */
     pill: (active: boolean) => ({
-      paddingHorizontal: 10,
-      paddingVertical: 5,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
       borderRadius: radius.pill,
       backgroundColor: active ? c.accent : c.surface2,
     }),
-    pillText: (active: boolean) => ({ ...font.small, color: active ? c.accentForeground : c.foreground }),
+    pillText: (active: boolean) => ({ ...font.body, color: active ? c.accentForeground : c.foreground }),
     /** Primary action button. */
-    button: { paddingHorizontal: space.md, paddingVertical: 7, borderRadius: radius.md, backgroundColor: c.accent },
-    buttonText: { ...font.small, fontWeight: weight.semibold, color: c.accentForeground },
+    button: { paddingHorizontal: space.lg, paddingVertical: 8, borderRadius: radius.md, backgroundColor: c.accent },
+    buttonText: { ...font.body, fontWeight: weight.semibold, color: c.accentForeground },
     /** Quiet secondary action. */
-    buttonQuiet: { paddingHorizontal: space.md, paddingVertical: 7, borderRadius: radius.md, backgroundColor: c.surface2 },
-    buttonQuietText: { ...font.small, color: c.foreground },
+    buttonQuiet: { paddingHorizontal: space.lg, paddingVertical: 8, borderRadius: radius.md, backgroundColor: c.surface2 },
+    buttonQuietText: { ...font.body, color: c.foreground },
     /** Text input. */
     input: {
       ...font.body,

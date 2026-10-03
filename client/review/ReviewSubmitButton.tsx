@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import { useRpc } from "@getpaseo/plugin/client";
@@ -14,7 +14,7 @@ const EVENTS = [
   { event: "COMMENT" as const, label: "Comment" },
 ];
 
-export function ReviewSubmitButton(props: PrTabContext) {
+export function ReviewSubmitButton(props: PrTabContext & { openRequest?: number }) {
   const { repo, number, theme, refresh, reanalyze, analysis, detail } = props;
   const c = theme.colors;
   const s = surfaces(c);
@@ -65,6 +65,14 @@ export function ReviewSubmitButton(props: PrTabContext) {
     }
     setOpen(true);
   }
+
+  const openRequest = props.openRequest ?? 0;
+  const seenRequest = useRef(openRequest);
+  useEffect(() => {
+    if (openRequest === seenRequest.current) return;
+    seenRequest.current = openRequest;
+    if (openRequest > 0) openReviewModal();
+  }, [openRequest]);
 
   function startEditDraft(index: number) {
     setEditingIndex(index);

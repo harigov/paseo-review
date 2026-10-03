@@ -36,6 +36,8 @@ export const InboxFiltersSchema = z.object({
   ci: z.enum(["any", "failing", "passing"]).default("any"),
   review: z.enum(["any", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]).default("any"),
   sort: z.enum(["attention", "updated", "created", "size", "severity"]).default("attention"),
+  /** Which inbox group is on screen. One list, so a PR is never repeated under several headings. */
+  group: z.enum(["needs_you", "recent", "mine", "review_requested", "assigned", "all"]).default("needs_you"),
 });
 export type InboxFilters = z.infer<typeof InboxFiltersSchema>;
 export const DEFAULT_INBOX_FILTERS: InboxFilters = InboxFiltersSchema.parse({});

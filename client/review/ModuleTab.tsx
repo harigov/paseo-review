@@ -1495,6 +1495,8 @@ export function ModuleTab(props: ModuleTabProps) {
 
   const viewedCount = moduleFiles.filter((file) => (viewedOverride[file.path] ?? file.viewed) === "VIEWED").length;
   const effectiveLines = moduleFiles.reduce((sum, file) => sum + file.effectiveLines, 0);
+  const moduleAdditions = moduleFiles.reduce((sum, file) => sum + file.additions, 0);
+  const moduleDeletions = moduleFiles.reduce((sum, file) => sum + file.deletions, 0);
   const otherModules = analysis?.modules.filter((m) => m.id !== moduleId) ?? [];
   const movingFile = movingPath ? moduleFiles.find((file) => file.path === movingPath) ?? null : null;
 
@@ -1535,7 +1537,7 @@ export function ModuleTab(props: ModuleTabProps) {
 
   return (
     <View style={{ flex: 1 }}>
-      <View style={{ padding: space.lg, gap: space.xs, borderBottomWidth: 1, borderColor: c.border }}>
+      <View style={{ padding: space.lg, gap: space.sm, borderBottomWidth: 1, borderColor: c.border }}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
           <Text style={{ ...font.heading, color: c.foreground, flex: 1 }}>{moduleInfo?.title ?? moduleId}</Text>
           <Pressable
@@ -1551,11 +1553,11 @@ export function ModuleTab(props: ModuleTabProps) {
             style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: space.sm, paddingVertical: space.xs }}
           >
             <Icon name="MessageSquare" size={13} color={c.accent} />
-            <Text style={{ ...font.small, color: c.accent }}>Ask about this module</Text>
+            <Text style={{ ...font.body, color: c.accent }}>Ask about this module</Text>
           </Pressable>
         </View>
-        {moduleInfo?.description ? <Text style={{ ...font.small, color: c.foregroundMuted }}>{moduleInfo.description}</Text> : null}
-        {moduleInfo?.summary ? <Text style={{ ...font.small, color: c.foreground }}>{moduleInfo.summary}</Text> : null}
+        {moduleInfo?.description ? <Text style={{ ...font.body, color: c.foregroundMuted }}>{moduleInfo.description}</Text> : null}
+        {moduleInfo?.summary ? <Text style={{ ...font.body, color: c.foreground }}>{moduleInfo.summary}</Text> : null}
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
           <View style={{ flexDirection: "row", gap: 4 }}>
             {DETAIL_LEVELS.map((level) => (
@@ -1572,9 +1574,12 @@ export function ModuleTab(props: ModuleTabProps) {
           {levelCaption ? <Text style={{ ...font.caption, color: c.foregroundMuted }}>{levelCaption}</Text> : null}
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexWrap: "wrap" }}>
-          <Text style={{ ...font.caption, color: c.foregroundMuted }}>
-            {viewedCount} of {moduleFiles.length} viewed · {effectiveLines} effective lines
+          <Text style={{ ...font.body, color: c.foregroundMuted }}>
+            {viewedCount} of {moduleFiles.length} viewed
           </Text>
+          <Text style={{ ...font.body, color: c.statusSuccess }}>+{moduleAdditions.toLocaleString()}</Text>
+          <Text style={{ ...font.body, color: c.statusDanger }}>−{moduleDeletions.toLocaleString()}</Text>
+          <Text style={{ ...font.body, color: c.foregroundMuted }}>{effectiveLines.toLocaleString()} lines</Text>
           {visibleUnviewedFiles.length > 0 ? (
             <Pressable accessibilityRole="button" onPress={() => void markModuleViewed()} style={surfaces(c).buttonQuiet}>
               <Text style={surfaces(c).buttonQuietText}>
@@ -1606,7 +1611,7 @@ export function ModuleTab(props: ModuleTabProps) {
 
       <View style={{ flex: 1, flexDirection: "row" }}>
         {!props.layout.compact && filePanelOpen ? (
-          <View style={{ width: 240, borderRightWidth: 1, borderColor: c.border }}>
+          <View style={{ width: 320, borderRightWidth: 1, borderColor: c.border }}>
             <FilePanel
               theme={theme}
               items={filePanelItems}

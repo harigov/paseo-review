@@ -3,12 +3,13 @@ import { Image, Pressable, Text, TextInput, View } from "react-native";
 import { FlatList, Icon } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useInbox, useRepos } from "../data/hooks";
-import type { InboxSection, PrSummary } from "../../shared/types";
-import type { InboxFilters, RecentPr } from "../../shared/ui-state";
+import { isInboxListedPr, type InboxSection, type PrSummary } from "../../shared/types";
+import type { InboxFilters } from "../../shared/ui-state";
 import { rememberInboxFilters, useInboxFilters, useRecentPrs } from "./ui-state";
 import { agoLabel, relativeAge } from "../ui/time";
 import { font, radius, space, surfaces } from "../ui/tokens";
 import { Dot } from "../ui/chips";
+import { ChoiceMenu } from "../ui/ChoiceMenu";
 import { EmptyState, ErrorState, InlineLoading, Skeleton } from "../ui/states";
 
 type ThemeColors = PluginSurfaceProps["theme"]["colors"];
@@ -17,6 +18,7 @@ type ReviewDecision = PrSummary["reviewDecision"];
 type SortKey = InboxFilters["sort"];
 type CiFilter = InboxFilters["ci"];
 type ReviewFilter = InboxFilters["review"];
+type GroupFilter = InboxFilters["group"];
 
 /** "Needs you" is synthesized client-side (not part of the server's `InboxSection` enum), so the
  * row/header model works over this superset instead of `InboxSection` directly. */
@@ -31,12 +33,6 @@ const SECTION_LABELS: Record<ClientSection, string> = {
   assigned: "Assigned",
   all: "All open",
 };
-
-type Row =
-  | { kind: "header"; section: ClientSection; count: number; first: boolean }
-  | { kind: "pr"; key: string; pr: PrSummary }
-  /** A PR opened in this app that no inbox search returned (e.g. merged long ago): title only. */
-  | { kind: "recentLite"; key: string; recent: RecentPr };
 
 const STATE_LABEL: Record<PrSummary["state"], string> = { OPEN: "", CLOSED: "Closed", MERGED: "Merged" };
 
@@ -99,13 +95,13 @@ function Avatar({ url, name, c }: { url: string | null; name: string; c: ThemeCo
         source={{ uri: url }}
         accessibilityLabel={name}
         onError={() => setFailed(true)}
-        style={{ width: 20, height: 20, borderRadius: 10 }}
+        style={{ width: 28, height: 28, borderRadius: 14 }}
       />
     );
   }
   return (
-    <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: c.surface2, alignItems: "center", justifyContent: "center" }}>
-      <Text style={{ ...font.caption, color: c.foregroundMuted }}>{(name.trim()[0] ?? "?").toUpperCase()}</Text>
+    <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: c.surface2, alignItems: "center", justifyContent: "center" }}>
+      <Text style={{ ...font.small, color: c.foregroundMuted }}>{(name.trim()[0] ?? "?").toUpperCase()}</Text>
     </View>
   );
 }
@@ -147,13 +143,13 @@ export function Inbox({
   const repos = useRepos();
   const recentLocal = useRecentPrs();
   const inboxFilters = useInboxFilters();
-  const [collapsed, setCollapsed] = useState<Partial<Record<ClientSection, boolean>>>({});
   const [search, setSearch] = useState(""); // not persisted, per spec
   const [repoFilter, setRepoFilter] = useRememberedFilter("repo", inboxFilters.repo);
   const [hideDrafts, setHideDrafts] = useRememberedFilter("hideDrafts", inboxFilters.hideDrafts);
   const [ciFilter, setCiFilter] = useRememberedFilter("ci", inboxFilters.ci);
   const [reviewFilter, setReviewFilter] = useRememberedFilter("review", inboxFilters.review);
   const [sort, setSort] = useRememberedFilter("sort", inboxFilters.sort);
+  const [group, setGroup] = useRememberedFilter("group", inboxFilters.group);
 
   // A remembered repo filter for a repo that is no longer a Paseo project would hide every PR
   // with no visible chip to clear it; drop it once the repo list is known.
@@ -183,7 +179,9 @@ export function Inbox({
     return () => doc.removeEventListener("keydown", handleKeyDown);
   }, [layout.platform]);
 
-  const prs = inbox.data?.prs ?? [];
+  // Drop merged PRs and anything not updated in the last 30 days, including snapshots cached
+  // before the search queries started excluding them.
+  const prs = (inbox.data?.prs ?? []).filter((pr) => isInboxListedPr(pr));
   const errors = inbox.data?.errors ?? [];
   // `inbox.data?.refreshing` is the server's background revalidation of a stale snapshot;
   // `inbox.refreshing` is this client's own forced refresh (the refresh button). Either one
@@ -208,9 +206,8 @@ export function Inbox({
     });
   }, [prs, search, repoFilter, hideDrafts, ciFilter, reviewFilter]);
 
-  // Per-section rows, independent of collapse state (so toggling a section's collapse doesn't
-  // re-run filtering/sorting for every other section).
-  const sectionsData = useMemo(() => {
+  // One group at a time, so a PR that sits in several GitHub searches appears once.
+  const listed = useMemo(() => {
     function sortPrs(items: PrSummary[]): PrSummary[] {
       const sorted = [...items];
       sorted.sort((a, b) => {
@@ -231,79 +228,78 @@ export function Inbox({
       return sorted;
     }
 
-    const result: Array<{ section: ClientSection; items: Row[] }> = [];
+    if (group === "needs_you") {
+      const items = filtered.filter(isNeedsYou);
+      // "Attention" here is the needs-you order (changed since your review, then review
+      // requested). It does not wait on decision-model scores, which other groups use.
+      return sort === "attention" ? sortNeedsYou(items) : sortPrs(items);
+    }
+    if (group === "recent") {
+      // PRs reviewed from this app, most recent first, then whatever else GitHub says you
+      // reviewed. Merely opening a PR doesn't count, and a review only stays listed while the
+      // PR itself is still in the inbox (not merged, updated within 30 days).
+      const byKey = new Map(filtered.map((pr) => [prKey(pr.repo, pr.number), pr]));
+      const seen = new Set<string>();
+      const items: PrSummary[] = [];
+      for (const recent of recentLocal) {
+        const key = prKey(recent.repo, recent.number);
+        if (seen.has(key)) continue;
+        const pr = byKey.get(key);
+        if (!pr) continue;
+        if (!recent.reviewedAt && !pr.sections.includes("recent")) continue;
+        seen.add(key);
+        items.push(pr);
+      }
+      for (const pr of sortPrs(filtered.filter((item) => item.sections.includes("recent")))) {
+        const key = prKey(pr.repo, pr.number);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push(pr);
+      }
+      // Updated (and Attention before scores exist) keeps "reviewed here" first. Any other
+      // sort applies to the whole list, so the control matches the order on screen.
+      if (sort === "updated" || (sort === "attention" && !haveAttention)) return items;
+      return sortPrs(items);
+    }
+    return sortPrs(filtered.filter((pr) => pr.sections.includes(group)));
+  }, [filtered, effectiveSort, recentLocal, group, sort, haveAttention]);
 
-    for (const section of SECTION_ORDER) {
-      if (section === "needs_you") {
-        const items = sortNeedsYou(filtered.filter(isNeedsYou)).map((pr) => ({
-          kind: "pr" as const,
-          key: `needs_you:${prKey(pr.repo, pr.number)}`,
-          pr,
-        }));
-        result.push({ section, items });
-        continue;
-      }
-      if (section === "recent") {
-        // PRs reviewed from this app, most recent first (full rows when a search returned the
-        // PR), then whatever else GitHub says you reviewed. Merely opening a PR doesn't count.
-        const byKey = new Map(filtered.map((pr) => [prKey(pr.repo, pr.number), pr]));
-        const seen = new Set<string>();
-        const items: Row[] = [];
-        for (const recent of recentLocal) {
-          const key = prKey(recent.repo, recent.number);
-          if (seen.has(key)) continue;
-          const pr = byKey.get(key);
-          if (!recent.reviewedAt && !pr?.sections.includes("recent")) continue;
-          if (pr) {
-            seen.add(key);
-            items.push({ kind: "pr", key: `recent:${key}`, pr });
-            continue;
-          }
-          if (repoFilter && recent.repo !== repoFilter) continue;
-          const q = search.trim().toLowerCase();
-          if (q && !`${recent.title} ${recent.repo} #${recent.number}`.toLowerCase().includes(q)) continue;
-          seen.add(key);
-          items.push({ kind: "recentLite", key: `recent-lite:${key}`, recent });
-        }
-        for (const pr of sortPrs(filtered.filter((pr) => pr.sections.includes("recent")))) {
-          const key = prKey(pr.repo, pr.number);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          items.push({ kind: "pr", key: `recent:${key}`, pr });
-        }
-        result.push({ section, items });
-        continue;
-      }
-      const inSection = sortPrs(filtered.filter((pr) => pr.sections.includes(section)));
-      result.push({
-        section,
-        items: inSection.map((pr) => ({ kind: "pr" as const, key: `${section}:${pr.repo}#${pr.number}`, pr })),
+  function groupHasItems(candidate: GroupFilter): boolean {
+    if (candidate === "needs_you") return filtered.some(isNeedsYou);
+    if (candidate === "recent") {
+      if (filtered.some((pr) => pr.sections.includes("recent"))) return true;
+      return recentLocal.some((recent) => {
+        const pr = filtered.find((item) => prKey(item.repo, item.number) === prKey(recent.repo, recent.number));
+        return !!pr && (!!recent.reviewedAt || pr.sections.includes("recent"));
       });
     }
-    return result;
-  }, [filtered, effectiveSort, recentLocal, repoFilter, search]);
+    return filtered.some((pr) => pr.sections.includes(candidate));
+  }
+  const otherGroup = SECTION_ORDER.find((candidate) => candidate !== group && groupHasItems(candidate));
 
-  const totalPrRows = useMemo(() => sectionsData.reduce((n, section) => n + section.items.length, 0), [sectionsData]);
-
-  // Sections with zero rows aren't rendered at all; non-empty sections keep their collapse state.
-  const rows = useMemo(() => {
-    const out: Row[] = [];
-    for (const { section, items } of sectionsData) {
-      if (items.length === 0) continue;
-      out.push({ kind: "header", section, count: items.length, first: out.length === 0 });
-      if (!collapsed[section]) out.push(...items);
-    }
-    return out;
-  }, [sectionsData, collapsed]);
-
-  const sortLabels: Record<SortKey, string> = {
-    attention: "Sort: Attention",
-    updated: "Sort: Updated",
-    created: "Sort: Created",
-    size: "Sort: Size",
-    severity: "Sort: Severity",
-  };
-  const sortOrder: SortKey[] = ["attention", "updated", "created", "size", "severity"];
+  const sortOptions: { value: SortKey; label: string }[] = [
+    { value: "attention", label: "Attention" },
+    { value: "updated", label: "Updated" },
+    { value: "created", label: "Created" },
+    { value: "size", label: "Size" },
+    { value: "severity", label: "Severity" },
+  ];
+  const ciOptions: { value: CiFilter; label: string }[] = [
+    { value: "any", label: "Any" },
+    { value: "failing", label: "Failing" },
+    { value: "passing", label: "Passing" },
+  ];
+  const reviewOptions: { value: ReviewFilter; label: string }[] = [
+    { value: "any", label: "Any" },
+    { value: "REVIEW_REQUIRED", label: "Review required" },
+    { value: "CHANGES_REQUESTED", label: "Changes requested" },
+    { value: "APPROVED", label: "Approved" },
+  ];
+  const groupOptions: { value: GroupFilter; label: string }[] = SECTION_ORDER.map((section) => ({
+    value: section,
+    label: SECTION_LABELS[section],
+  }));
+  const filtersNarrow = Boolean(search.trim() || repoFilter || hideDrafts || ciFilter !== "any" || reviewFilter !== "any");
 
   if (repos.data && repos.data.repos.length === 0) {
     return (
@@ -327,7 +323,7 @@ export function Inbox({
           </Pressable>
         </View>
       )}
-      <View style={{ padding: space.md, gap: space.sm, borderBottomWidth: 1, borderColor: c.border }}>
+      <View style={{ padding: space.lg, gap: space.md, borderBottomWidth: 1, borderColor: c.border }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
           <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: space.sm }}>
             <Icon name="Search" size={14} color={c.foregroundMuted} />
@@ -341,7 +337,7 @@ export function Inbox({
             />
           </View>
           {inbox.data && (
-            <Text style={{ ...font.caption, color: c.foregroundMuted }}>Updated {agoLabel(inbox.data.fetchedAt)}</Text>
+            <Text style={{ ...font.small, color: c.foregroundMuted }}>Updated {agoLabel(inbox.data.fetchedAt)}</Text>
           )}
           <Pressable
             accessibilityRole="button"
@@ -357,25 +353,41 @@ export function Inbox({
             <FilterChip c={c} key={repo.slug} label={repo.slug} active={repoFilter === repo.slug} onPress={() => setRepoFilter((cur) => (cur === repo.slug ? null : repo.slug))} />
           ))}
           <FilterChip c={c} label={hideDrafts ? "Drafts hidden" : "Hide drafts"} active={hideDrafts} onPress={() => setHideDrafts((v) => !v)} />
-          <FilterChip c={c}
+          <ChoiceMenu
+            c={c}
+            title="Show"
+            label={SECTION_LABELS[group]}
+            value={group}
+            options={groupOptions}
+            active={group !== "needs_you"}
+            onChange={(next) => setGroup(() => next)}
+          />
+          <ChoiceMenu
+            c={c}
+            title="CI"
             label={ciFilter === "any" ? "CI: any" : ciFilter === "failing" ? "CI: failing" : "CI: passing"}
+            value={ciFilter}
+            options={ciOptions}
             active={ciFilter !== "any"}
-            onPress={() => setCiFilter((cur) => (cur === "any" ? "failing" : cur === "failing" ? "passing" : "any"))}
+            onChange={(next) => setCiFilter(() => next)}
           />
-          <FilterChip c={c}
+          <ChoiceMenu
+            c={c}
+            title="Review"
             label={reviewFilter === "any" ? "Review: any" : REVIEW_LABEL[reviewFilter] || "Review: any"}
+            value={reviewFilter}
+            options={reviewOptions}
             active={reviewFilter !== "any"}
-            onPress={() =>
-              setReviewFilter((cur) => {
-                const order: ReviewFilter[] = ["any", "REVIEW_REQUIRED", "CHANGES_REQUESTED", "APPROVED"];
-                return order[(order.indexOf(cur) + 1) % order.length];
-              })
-            }
+            onChange={(next) => setReviewFilter(() => next)}
           />
-          <FilterChip c={c}
-            label={sortLabels[sort]}
-            active={false}
-            onPress={() => setSort((cur) => sortOrder[(sortOrder.indexOf(cur) + 1) % sortOrder.length])}
+          <ChoiceMenu
+            c={c}
+            title="Sort"
+            label={`Sort: ${sortOptions.find((option) => option.value === sort)?.label ?? "Updated"}`}
+            value={sort}
+            options={sortOptions}
+            active={sort !== "attention"}
+            onChange={(next) => setSort(() => next)}
           />
         </View>
       </View>
@@ -384,18 +396,34 @@ export function Inbox({
         <Skeleton theme={theme} rows={6} lineHeight={64} widths={["100%", "100%", "100%", "100%", "100%", "100%"]} />
       ) : inbox.isError ? (
         <ErrorState theme={theme} message="Could not load the inbox." onRetry={() => inbox.refresh()} />
-      ) : totalPrRows === 0 && prs.length === 0 ? (
+      ) : prs.length === 0 ? (
         <EmptyState
           theme={theme}
           title="No pull requests"
           hint="PR Review pulls pull requests from repos already added to Paseo as projects with a github.com remote. Add a repo as a Paseo project to see its PRs here."
         />
-      ) : totalPrRows === 0 ? (
+      ) : listed.length === 0 && !filtersNarrow ? (
+        <EmptyState
+          theme={theme}
+          title={group === "needs_you" ? "Nothing needs you" : `Nothing in ${SECTION_LABELS[group]}`}
+          hint={
+            group === "needs_you"
+              ? otherGroup
+                ? `No open pull request is waiting on your review. ${SECTION_LABELS[otherGroup]} still has some.`
+                : "No open pull request is waiting on your review."
+              : otherGroup
+                ? `${SECTION_LABELS[otherGroup]} still has pull requests.`
+                : "Nothing in the inbox is in this group."
+          }
+          actionLabel={otherGroup ? `Show ${SECTION_LABELS[otherGroup]}` : undefined}
+          onAction={otherGroup ? () => setGroup(() => otherGroup) : undefined}
+        />
+      ) : listed.length === 0 ? (
         <EmptyState
           theme={theme}
           icon="Filter"
           title="No pull requests match"
-          hint="Your search or filters hide every open PR."
+          hint="Your search or filters hide every pull request in this list."
           actionLabel="Clear filters"
           onAction={() => {
             setSearch("");
@@ -407,101 +435,64 @@ export function Inbox({
         />
       ) : (
         <FlatList
-          data={rows}
-          keyExtractor={(row: Row) => (row.kind === "header" ? `h:${row.section}` : row.key)}
-          contentContainerStyle={{ padding: space.md, gap: space.sm + 2 }}
-          renderItem={({ item }: { item: Row }) => {
-            if (item.kind === "header") {
-              const isCollapsed = !!collapsed[item.section];
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => setCollapsed((cur) => ({ ...cur, [item.section]: !cur[item.section] }))}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: space.sm,
-                    paddingVertical: space.sm + 2,
-                    marginTop: item.first ? 0 : space.xs + 2,
-                  }}
-                >
-                  <Icon name={isCollapsed ? "ChevronRight" : "ChevronDown"} size={14} color={c.foregroundMuted} />
-                  {item.section === "needs_you" && <Dot color={c.accent} size={6} />}
-                  <Text style={{ ...font.title, color: c.foreground }}>
-                    {SECTION_LABELS[item.section]}{" "}
-                    <Text style={{ ...font.title, fontWeight: "400", color: c.foregroundMuted }}>({item.count})</Text>
-                  </Text>
-                </Pressable>
-              );
-            }
-            if (item.kind === "recentLite") {
-              const recent = item.recent;
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => onOpenPr({ repo: recent.repo, number: recent.number, title: recent.title })}
-                  style={({ pressed }) => ({ ...s.card, backgroundColor: pressed ? c.surface2 : c.surface1, gap: space.xs + 2 })}
-                >
-                  <Text numberOfLines={2} style={{ ...font.bodyLg, fontWeight: "600", color: c.foreground }}>
-                    {recent.title}
-                  </Text>
-                  <Text style={{ ...font.small, color: c.foregroundMuted }}>
-                    {recent.repo}#{recent.number} · opened {agoLabel(recent.openedAt)}
-                    {recent.reviewedAt ? ` · reviewed ${agoLabel(recent.reviewedAt)}` : ""}
-                  </Text>
-                </Pressable>
-              );
-            }
-            const pr = item.pr;
-            const ciColor =
-              pr.checks === "success" ? c.statusSuccess : pr.checks === "failure" ? c.statusDanger : pr.checks === "pending" ? c.statusWarning : c.foregroundMuted;
+          data={listed}
+          keyExtractor={(pr: PrSummary) => prKey(pr.repo, pr.number)}
+          contentContainerStyle={{ padding: space.lg, gap: space.md }}
+          renderItem={({ item: pr }: { item: PrSummary }) => {
             const extraLabels = Math.max(0, pr.labels.length - 3);
             return (
               <Pressable
                 accessibilityRole="button"
                 onPress={() => onOpenPr({ repo: pr.repo, number: pr.number, title: pr.title })}
-                style={({ pressed }) => ({ ...s.card, backgroundColor: pressed ? c.surface2 : c.surface1, gap: space.xs + 2 })}
+                style={({ pressed }) => ({ ...s.card, backgroundColor: pressed ? c.surface2 : c.surface1, gap: space.sm })}
               >
-                <Text numberOfLines={2} style={{ ...font.bodyLg, fontWeight: "600", color: c.foreground }}>
+                <Text numberOfLines={2} style={{ ...font.title, color: c.foreground }}>
                   {pr.title}
                 </Text>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
                   <Avatar url={pr.authorAvatarUrl} name={pr.author} c={c} />
-                  <Text style={{ ...font.small, color: c.foregroundMuted }}>
+                  <Text style={{ ...font.body, color: c.foregroundMuted }}>
                     {pr.repo}#{pr.number} · {pr.author} · {relativeAge(pr.updatedAt)}
                   </Text>
                 </View>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
                   {pr.isDraft && (
-                    <Text style={{ ...font.caption, color: c.foregroundMuted, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 5 }}>Draft</Text>
+                    <Text style={{ ...font.small, color: c.foregroundMuted, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 2 }}>Draft</Text>
                   )}
                   {!!STATE_LABEL[pr.state] && (
-                    <Text style={{ ...font.caption, color: pr.state === "MERGED" ? c.accent : c.foregroundMuted, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 5 }}>
+                    <Text style={{ ...font.small, color: pr.state === "MERGED" ? c.accent : c.foregroundMuted, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 2 }}>
                       {STATE_LABEL[pr.state]}
                     </Text>
                   )}
-                  <Dot color={ciColor} size={8} />
-                  {!!REVIEW_LABEL[pr.reviewDecision] && <Text style={{ ...font.caption, color: c.foregroundMuted }}>{REVIEW_LABEL[pr.reviewDecision]}</Text>}
-                  <Text style={{ ...font.caption, color: c.statusSuccess }}>+{pr.additions}</Text>
-                  <Text style={{ ...font.caption, color: c.statusDanger }}>-{pr.deletions}</Text>
-                  <Text style={{ ...font.caption, color: c.foregroundMuted }}>{pr.changedFiles} files</Text>
-                  {pr.unresolvedThreads > 0 && <Text style={{ ...font.caption, color: c.foregroundMuted }}>{pr.unresolvedThreads} unresolved</Text>}
+                  {!!REVIEW_LABEL[pr.reviewDecision] && <Text style={{ ...font.small, color: c.foregroundMuted }}>{REVIEW_LABEL[pr.reviewDecision]}</Text>}
+                  {pr.checks === "failure" ? (
+                    <Text style={{ ...font.small, color: c.statusDanger }}>CI failing</Text>
+                  ) : (
+                    <Dot
+                      color={pr.checks === "success" ? c.statusSuccess : pr.checks === "pending" ? c.statusWarning : c.foregroundMuted}
+                      size={8}
+                    />
+                  )}
+                  <Text style={{ ...font.small, color: c.statusSuccess }}>+{pr.additions.toLocaleString()}</Text>
+                  <Text style={{ ...font.small, color: c.statusDanger }}>−{pr.deletions.toLocaleString()}</Text>
+                  <Text style={{ ...font.small, color: c.foregroundMuted }}>{pr.changedFiles} files</Text>
+                  {pr.unresolvedThreads > 0 && <Text style={{ ...font.small, color: c.foregroundMuted }}>{pr.unresolvedThreads} unresolved</Text>}
                   {pr.severity !== null && (
-                    <Text style={{ ...font.caption, color: c.foreground, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 5 }}>Sev {pr.severity}</Text>
+                    <Text style={{ ...font.small, color: c.foreground, backgroundColor: c.surface2, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 2 }}>Sev {pr.severity}</Text>
                   )}
                   {pr.changedSinceMyReview !== null && pr.changedSinceMyReview > 0 && (
-                    <Text style={{ ...font.caption, color: c.accent }}>{pr.changedSinceMyReview} changed since your review</Text>
+                    <Text style={{ ...font.small, color: c.accent }}>{pr.changedSinceMyReview} changed since your review</Text>
                   )}
                   {pr.labels.slice(0, 3).map((label) => (
                     <View key={label} style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.pill, backgroundColor: c.surface2 }}>
-                      <Text numberOfLines={1} style={{ ...font.caption, color: c.foregroundMuted }}>
+                      <Text numberOfLines={1} style={{ ...font.small, color: c.foregroundMuted }}>
                         {label}
                       </Text>
                     </View>
                   ))}
                   {extraLabels > 0 && (
                     <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.pill, backgroundColor: c.surface2 }}>
-                      <Text style={{ ...font.caption, color: c.foregroundMuted }}>+{extraLabels}</Text>
+                      <Text style={{ ...font.small, color: c.foregroundMuted }}>+{extraLabels}</Text>
                     </View>
                   )}
                 </View>

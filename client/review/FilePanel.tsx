@@ -48,13 +48,13 @@ type ThemeColors = PluginSurfaceProps["theme"]["colors"];
 
 /** Fixed row height: lets `getItemLayout` make `scrollToIndex` exact (no `onScrollToIndexFailed`
  * dance needed) and keeps the list cheap to virtualize over hundreds of files. */
-const ROW_HEIGHT = 48;
+const ROW_HEIGHT = 58;
 /** Above this many files, a filter box earns its keep. */
 const FILTER_THRESHOLD = 20;
 /** Rough character budget for the muted directory line once the status badge, name and the
- * right-hand badges/counters have taken their share of the 240px column; `numberOfLines={1}`
+ * right-hand badges/counters have taken their share of the 320px column; `numberOfLines={1}`
  * backs this up for anything narrower than that estimate. */
-const DIR_MAX_CHARS = 28;
+const DIR_MAX_CHARS = 42;
 
 function toneColor(tone: StatusTone, c: ThemeColors): string {
   switch (tone) {
@@ -140,7 +140,7 @@ function FileRow({
         <Text style={{ ...font.caption, fontWeight: "700", color: toneColor(statusTone(item.status), c) }}>{statusLetter(item.status)}</Text>
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ ...font.small, color: c.foreground }} numberOfLines={1}>
+        <Text style={{ ...font.body, color: c.foreground }} numberOfLines={1}>
           {base}
         </Text>
         {dir ? (
@@ -151,8 +151,8 @@ function FileRow({
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, flexShrink: 0 }}>
         <View style={{ flexDirection: "row", alignItems: "baseline", gap: 3 }}>
-          <Text style={{ ...font.caption, color: c.statusSuccess }}>+{item.additions}</Text>
-          <Text style={{ ...font.caption, color: c.statusDanger }}>−{item.deletions}</Text>
+          <Text style={{ ...font.small, color: c.statusSuccess }}>+{item.additions}</Text>
+          <Text style={{ ...font.small, color: c.statusDanger }}>−{item.deletions}</Text>
         </View>
         {item.risk !== null ? <Dot color={riskColor(item.risk, c)} size={7} /> : null}
         <CountBadge icon="MessageSquare" count={item.threadCount} c={c} />
@@ -249,7 +249,7 @@ function FilePanelBody({ theme, items, currentPath, onSelect, onCollapse, showCo
   );
 }
 
-/** Fills its parent (ModuleTab gives it a 240 px column on wide layouts). */
+/** Fills its parent (ModuleTab gives it a 320 px column on wide layouts). */
 export function FilePanel(props: FilePanelProps) {
   return <FilePanelBody {...props} showCollapse={true} />;
 }

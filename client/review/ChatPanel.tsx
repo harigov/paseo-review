@@ -74,8 +74,8 @@ function MessageRow({ message, theme, prUrl }: { message: ChatMessage; theme: Th
   const c = theme.colors;
   if (message.role === "user") {
     return (
-      <View style={{ alignSelf: "flex-end", maxWidth: "88%", backgroundColor: c.surface2, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 }}>
-        <Text style={{ color: c.foreground, fontSize: 13 }}>{message.text}</Text>
+      <View style={{ alignSelf: "flex-end", maxWidth: "88%", backgroundColor: c.surface2, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 }}>
+        <Text style={{ color: c.foreground, ...font.body }}>{message.text}</Text>
       </View>
     );
   }
@@ -91,7 +91,7 @@ function MessageRow({ message, theme, prUrl }: { message: ChatMessage; theme: Th
     return (
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Icon name="Wrench" size={11} color={color} />
-        <Text style={{ color, fontSize: 11, flex: 1 }} numberOfLines={1}>
+        <Text style={{ color, ...font.small, flex: 1 }} numberOfLines={1}>
           {message.text}
           {message.status === "running" ? "…" : ""}
           {message.detail ? ` — ${message.detail}` : ""}

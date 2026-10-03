@@ -19,11 +19,11 @@ export function Chip({ label, color }: { label: string; color: string }) {
         borderWidth: 1,
         borderColor: color,
         borderRadius: 4,
-        paddingHorizontal: 5,
-        paddingVertical: 1,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
       }}
     >
-      <Text style={{ color, fontSize: 10 }} numberOfLines={1}>
+      <Text style={{ color, fontSize: 12, lineHeight: 16 }} numberOfLines={1}>
         {label}
       </Text>
     </View>

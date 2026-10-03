@@ -10,8 +10,9 @@ import { assetGetRpc, type AssetName } from "../../shared/rpc";
 //
 // This file must never `require`/`import` the asset's own package (esbuild would then bundle
 // its entire tree into this server bundle, defeating the point). Only `fs` is used, at a path
-// discovered at runtime, because we couldn't confirm where Paseo's compiled server bundle ends
-// up running from relative to the plugin's own `node_modules` — so we try several candidates.
+// discovered at runtime. Paseo evals the compiled server bundle, so `__dirname` is not defined
+// there; the installed checkout under `$PASEO_HOME/plugins/pr-review/<id>/checkout` is the
+// location that actually contains `node_modules`.
 
 // Chunks are counted in UTF-16 code units of the decoded text (`String.slice`), not raw bytes.
 // For the plain-ASCII minified JS this serves, the two are effectively the same; treating the
@@ -66,17 +67,29 @@ function pluginCheckoutCandidates(relative: string, paseoHome?: string): string[
   return checkouts.map((entry) => path.join(entry.checkout, "node_modules", relative));
 }
 
-/** First existing candidate across __dirname-relative, cwd-relative, and plugin-checkout
- * locations, in that order; null (not an error) when none of them exist. `roots` overrides the
- * three starting points (real `__dirname`/`process.cwd()`/`$PASEO_HOME` by default) — exported
- * for tests, which can't relocate this module or the process's cwd/env. */
+/** Directory of this bundle when the runtime actually provides `__dirname`.
+ * Paseo evaluates the server bundle with `eval` inside `(function (require) { ... })`, which
+ * defines `require`/`module`/`exports` but not `__dirname`. Reading `__dirname` there throws
+ * `ReferenceError: __dirname is not defined` and used to fail `prr.asset.get` before the
+ * checkout fallback (where `mermaid.min.js` actually lives) could run. `typeof` does not throw. */
+function bundleDir(explicit: string | null | undefined): string | null {
+  if (typeof explicit === "string") return explicit;
+  if (explicit === null) return null;
+  return typeof __dirname === "string" ? __dirname : null;
+}
+
+/** First existing candidate across the bundle directory, cwd, and plugin-checkout locations, in
+ * that order; null (not an error) when none of them exist. `roots` overrides the three starting
+ * points — exported for tests, which can't relocate this module or the process's cwd/env.
+ * `dirnameRoot: null` skips the bundle directory, matching Paseo's eval'd bundle. */
 export function findAssetFile(
   name: AssetName,
-  roots: { dirnameRoot?: string; cwdRoot?: string; paseoHome?: string } = {},
+  roots: { dirnameRoot?: string | null; cwdRoot?: string; paseoHome?: string } = {},
 ): string | null {
   const relative = ASSET_RELATIVE_PATH[name];
+  const fromBundle = bundleDir(roots.dirnameRoot);
   const candidates = [
-    ...nodeModulesCandidates(roots.dirnameRoot ?? __dirname, relative),
+    ...(fromBundle ? nodeModulesCandidates(fromBundle, relative) : []),
     ...nodeModulesCandidates(roots.cwdRoot ?? process.cwd(), relative),
     ...pluginCheckoutCandidates(relative, roots.paseoHome),
   ];

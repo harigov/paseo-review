@@ -15,9 +15,19 @@ export const RepoSchema = z.object({
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
-/** "recent" = PRs the viewer reviewed (any state), newest activity first; the rest are open PRs. */
+/** "recent" = PRs the viewer reviewed, excluding merged, newest activity first; the rest are open PRs. */
 export const InboxSectionSchema = z.enum(["recent", "mine", "review_requested", "assigned", "all"]);
 export type InboxSection = z.infer<typeof InboxSectionSchema>;
+
+/** Inbox lists omit anything last updated longer ago than this. */
+export const INBOX_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Merged PRs and PRs not updated within `INBOX_MAX_AGE_MS` are left out of the inbox. */
+export function isInboxListedPr(pr: { state: "OPEN" | "CLOSED" | "MERGED"; updatedAt: string }, now = Date.now()): boolean {
+  if (pr.state === "MERGED") return false;
+  const updated = Date.parse(pr.updatedAt);
+  return Number.isFinite(updated) && now - updated <= INBOX_MAX_AGE_MS;
+}
 
 export const ChecksStateSchema = z.enum(["success", "failure", "pending", "none"]);
 export const ReviewDecisionSchema = z.enum(["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", "NONE"]);

@@ -18,7 +18,7 @@ describe("ui-state store", () => {
       recentPrs: [
         { repo: "owner/repo", number: 7, title: "Fix the thing", openedAt: "2026-01-01T00:00:00.000Z", reviewedAt: null },
       ],
-      inboxFilters: { repo: null, hideDrafts: true, ci: "failing", review: "any", sort: "updated" },
+      inboxFilters: { repo: null, hideDrafts: true, ci: "failing", review: "any", sort: "updated", group: "needs_you" },
     };
 
     await saveUiState(state);

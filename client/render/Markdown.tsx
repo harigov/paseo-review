@@ -332,7 +332,7 @@ export function Markdown({ body, theme, baseUrl }: { body: string; theme: Theme;
   // must be on; HTML comments (bot markers, hidden metadata) are stripped before lexing so
   // they never surface as stray text or confuse the <details>-spanning logic below.
   const tokens = useMemo(() => marked.lexer(stripHtmlComments(body), { gfm: true, breaks: true }), [body]);
-  const text: TextStyle = { color: c.foreground, fontSize: 14, lineHeight: 22 };
+  const text: TextStyle = { color: c.foreground, fontSize: 15, lineHeight: 23 };
 
   function open(href: string) {
     const url = safeLink(href, baseUrl);

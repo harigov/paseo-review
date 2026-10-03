@@ -271,18 +271,20 @@ export function OverviewTab(props: PrTabContext) {
                 return (
                   <View key={row.module.id}>
                     {index > 0 ? <View style={{ ...s.hairline, marginVertical: space.sm }} /> : null}
-                    <View style={{ gap: space.xs, paddingVertical: space.xs }}>
+                    <View style={{ gap: space.sm, paddingVertical: space.sm }}>
                       <Pressable accessibilityRole="button" onPress={() => openTab(`module:${row.module.id}`)}>
-                        <Text style={{ ...font.body, fontWeight: "600" as const, color: c.foreground }} numberOfLines={1}>
+                        <Text style={{ ...font.bodyLg, fontWeight: "600" as const, color: c.foreground }} numberOfLines={1}>
                           {row.module.title}
                         </Text>
                       </Pressable>
                       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
                         <Chip label={changeMapStatusLabel(row.status)} color={changeMapStatusColor(row.status, c)} />
-                        {row.countsLabel ? <Text style={{ ...font.small, color: c.foregroundMuted }}>{row.countsLabel}</Text> : null}
-                        <Text style={{ ...font.small, color: c.foregroundMuted }}>{row.module.effectiveLines} lines</Text>
-                        <Dot color={riskColor(row.module.maxRisk, c)} />
-                        <Text style={{ ...font.small, color: c.foregroundMuted }}>
+                        <Text style={{ ...font.body, color: c.statusSuccess }}>+{row.module.additions.toLocaleString()}</Text>
+                        <Text style={{ ...font.body, color: c.statusDanger }}>−{row.module.deletions.toLocaleString()}</Text>
+                        <Text style={{ ...font.body, color: c.foregroundMuted }}>{row.module.effectiveLines.toLocaleString()} lines</Text>
+                        {row.countsLabel ? <Text style={{ ...font.body, color: c.foregroundMuted }}>{row.countsLabel}</Text> : null}
+                        <Dot color={riskColor(row.module.maxRisk, c)} size={8} />
+                        <Text style={{ ...font.body, color: c.foregroundMuted }}>
                           {row.module.viewedFiles}/{row.module.fileCount} viewed
                         </Text>
                       </View>

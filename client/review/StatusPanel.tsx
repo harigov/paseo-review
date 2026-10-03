@@ -62,8 +62,8 @@ function groupChecksByApp(checks: PrCheck[]): { app: string; checks: PrCheck[] }
 function ReviewerAvatar({ author, c }: { author: string; c: ThemeColors }) {
   const letter = (author.trim()[0] ?? "?").toUpperCase();
   return (
-    <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: c.surface2, alignItems: "center", justifyContent: "center" }}>
-      <Text style={{ ...font.caption, fontWeight: weight.semibold, color: c.foreground }}>{letter}</Text>
+    <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: c.surface2, alignItems: "center", justifyContent: "center" }}>
+      <Text style={{ ...font.small, fontWeight: weight.semibold, color: c.foreground }}>{letter}</Text>
     </View>
   );
 }
@@ -75,7 +75,7 @@ export function StatusPanel(props: PrTabContext) {
   const { theme, detail, analysis, openTab } = props;
   const c = theme.colors;
   const s = surfaces(c);
-  const muted = { ...font.small, color: c.foregroundMuted };
+  const muted = { ...font.body, color: c.foregroundMuted };
 
   if (!detail) {
     return (
@@ -100,7 +100,7 @@ export function StatusPanel(props: PrTabContext) {
   const uncertainValidators = (analysis?.validators ?? []).filter((v) => v.status === "uncertain");
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: space.md, gap: space.lg }}>
+    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: space.lg, gap: space.xl }}>
       <View style={{ ...s.card, gap: space.sm }}>
         <Text style={{ ...font.title, color: c.foreground }}>Review</Text>
         {reviewDecisionChip && <Chip label={reviewDecisionChip.label} color={reviewDecisionChip.color(c)} />}
@@ -113,7 +113,7 @@ export function StatusPanel(props: PrTabContext) {
               <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
                 <ReviewerAvatar author={review.author} c={c} />
                 <Icon name={icon.name} size={13} color={icon.color(c)} />
-                <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
+                <Text numberOfLines={1} style={{ ...font.body, color: c.foreground, flex: 1 }}>
                   {review.author}
                 </Text>
                 {review.authorKind === "bot" && <Chip label="bot" color={c.foregroundMuted} />}
@@ -164,7 +164,7 @@ export function StatusPanel(props: PrTabContext) {
                   const row = (
                     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
                       <Dot color={CHECK_DOT_COLOR[check.state](c)} />
-                      <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
+                      <Text numberOfLines={1} style={{ ...font.body, color: c.foreground, flex: 1 }}>
                         {check.name}
                       </Text>
                     </View>
@@ -200,10 +200,10 @@ export function StatusPanel(props: PrTabContext) {
                   onPress={() => openTab("validators")}
                   style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}
                 >
-                  <Text style={{ ...font.small, color: result.status === "fail" ? c.statusDanger : c.statusWarning }}>
+                  <Text style={{ ...font.body, color: result.status === "fail" ? c.statusDanger : c.statusWarning }}>
                     {result.status === "fail" ? "✗" : "?"}
                   </Text>
-                  <Text numberOfLines={1} style={{ ...font.small, color: c.foreground, flex: 1 }}>
+                  <Text numberOfLines={1} style={{ ...font.body, color: c.foreground, flex: 1 }}>
                     {result.title}
                   </Text>
                   <Text style={muted}>{result.severity}</Text>

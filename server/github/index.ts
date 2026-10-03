@@ -18,7 +18,9 @@ import {
   threadReplyRpc,
 } from "../../shared/rpc";
 import {
+  INBOX_MAX_AGE_MS,
   PrSummarySchema,
+  isInboxListedPr,
   type InboxSection,
   type PrDetail,
   type PrFile,
@@ -441,7 +443,7 @@ async function fillInboxEnrichment(prs: PrSummary[], repos: Repo[]): Promise<voi
       }
     }),
   );
-  // Merged/closed PRs (from the "recent" search) need no attention score.
+  // Closed PRs (still allowed in "recent") need no attention score. Merged PRs never reach here.
   const eligible = prs.filter((pr) => pr.state === "OPEN" && decisionsEnabled.get(pr.repo.toLowerCase()));
   if (eligible.length) await fillAttention(eligible);
 }
@@ -461,6 +463,24 @@ async function listInbox(refresh?: boolean): Promise<InboxCacheValue & { refresh
     // Not cached, so the next call tries again.
     return { viewer: "", prs: [], fetchedAt: new Date().toISOString(), errors: [`Could not load the GitHub inbox: ${errorMessage(error)}`], refreshing: false };
   }
+}
+
+/** GitHub search qualifiers for each inbox section.
+ * Merged PRs are excluded everywhere (`-is:merged`, and `is:open` on the non-recent sections).
+ * Every section also requires an update within the last 30 days (`updated:>=YYYY-MM-DD`, UTC). */
+export function inboxSearchSections(repoFilter: string, now = new Date()): Record<InboxSection, string> {
+  const cutoff = new Date(now.getTime() - INBOX_MAX_AGE_MS);
+  const y = cutoff.getUTCFullYear();
+  const m = String(cutoff.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(cutoff.getUTCDate()).padStart(2, "0");
+  const recentWindow = `updated:>=${y}-${m}-${d}`;
+  return {
+    recent: `is:pr -is:merged reviewed-by:@me -author:@me ${recentWindow} ${repoFilter} sort:updated-desc`,
+    mine: `is:pr is:open author:@me ${recentWindow} ${repoFilter}`,
+    review_requested: `is:pr is:open review-requested:@me ${recentWindow} ${repoFilter}`,
+    assigned: `is:pr is:open assignee:@me ${recentWindow} ${repoFilter}`,
+    all: `is:pr is:open ${recentWindow} ${repoFilter} sort:updated-desc`,
+  };
 }
 
 /** One true fetch of the inbox from GitHub: search + enrichment. Rejects on a GraphQL failure
@@ -483,14 +503,7 @@ async function fetchInbox(): Promise<InboxCacheValue> {
   }
 
   const repoFilter = repos.map((r) => `repo:${r.slug}`).join(" ");
-  const sections: Record<InboxSection, string> = {
-    // Any state: a PR you reviewed last week and that merged since still belongs under "recent".
-    recent: `is:pr reviewed-by:@me -author:@me ${repoFilter} sort:updated-desc`,
-    mine: `is:pr is:open author:@me ${repoFilter}`,
-    review_requested: `is:pr is:open review-requested:@me ${repoFilter}`,
-    assigned: `is:pr is:open assignee:@me ${repoFilter}`,
-    all: `is:pr is:open ${repoFilter} sort:updated-desc`,
-  };
+  const sections = inboxSearchSections(repoFilter);
 
   const data = await graphqlWithVars<{
     recent: { nodes: SearchPrNode[] };
@@ -526,7 +539,9 @@ async function fetchInbox(): Promise<InboxCacheValue> {
     }
   }
 
-  const prs = [...merged.values()];
+  // Search already asks GitHub to drop merged and stale PRs; filter again so a stale index hit
+  // or a date-granularity `updated:` qualifier can't put one in the list.
+  const prs = [...merged.values()].filter((pr) => isInboxListedPr(pr));
   await fillInboxEnrichment(prs, repos);
 
   return { viewer, prs, fetchedAt: new Date().toISOString(), errors };
