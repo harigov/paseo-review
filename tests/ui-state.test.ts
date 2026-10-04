@@ -18,13 +18,23 @@ describe("ui-state store", () => {
       recentPrs: [
         { repo: "owner/repo", number: 7, title: "Fix the thing", openedAt: "2026-01-01T00:00:00.000Z", reviewedAt: null },
       ],
-      inboxFilters: { repo: null, hideDrafts: true, ci: "failing", review: "any", sort: "updated", group: "needs_you" },
+      inboxFilters: { repo: null, hideDrafts: true, ci: "failing", review: "any", sort: "updated", tab: "needs_you" },
     };
 
     await saveUiState(state);
     const loaded = await loadUiState();
 
     expect(loaded).toEqual(state);
+  });
+
+  it("opens the inbox on All open when the saved filters predate the tab field", async () => {
+    const file = path.join(dataDir(), "ui-state.json");
+    const saved = { ...DEFAULT_UI_STATE, inboxFilters: { repo: null, hideDrafts: false, ci: "any", review: "any", sort: "attention", group: "needs_you" } };
+    writeFileSync(file, JSON.stringify(saved), "utf8");
+
+    const loaded = await loadUiState();
+
+    expect(loaded.inboxFilters.tab).toBe("all");
   });
 
   it("falls back to defaults when the file holds invalid JSON", async () => {

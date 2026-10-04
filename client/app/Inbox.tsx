@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Image, Pressable, Text, TextInput, View } from "react-native";
-import { FlatList, Icon } from "@getpaseo/plugin/client/react-native";
+import { FlatList, Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useInbox, useRepos } from "../data/hooks";
 import { isInboxListedPr, type InboxSection, type PrSummary } from "../../shared/types";
 import type { InboxFilters } from "../../shared/ui-state";
 import { rememberInboxFilters, useInboxFilters, useRecentPrs } from "./ui-state";
 import { agoLabel, relativeAge } from "../ui/time";
-import { font, radius, space, surfaces } from "../ui/tokens";
+import { font, radius, space, surfaces, weight } from "../ui/tokens";
 import { Dot } from "../ui/chips";
 import { ChoiceMenu } from "../ui/ChoiceMenu";
 import { EmptyState, ErrorState, InlineLoading, Skeleton } from "../ui/states";
@@ -18,13 +18,14 @@ type ReviewDecision = PrSummary["reviewDecision"];
 type SortKey = InboxFilters["sort"];
 type CiFilter = InboxFilters["ci"];
 type ReviewFilter = InboxFilters["review"];
-type GroupFilter = InboxFilters["group"];
+type TabFilter = InboxFilters["tab"];
 
 /** "Needs you" is synthesized client-side (not part of the server's `InboxSection` enum), so the
  * row/header model works over this superset instead of `InboxSection` directly. */
 type ClientSection = InboxSection | "needs_you";
 
-const SECTION_ORDER: ClientSection[] = ["needs_you", "recent", "mine", "review_requested", "assigned", "all"];
+/** Tab order: All open (the default) first, so the inbox opens on every PR. */
+const TAB_ORDER: ClientSection[] = ["all", "needs_you", "recent", "mine", "review_requested", "assigned"];
 const SECTION_LABELS: Record<ClientSection, string> = {
   needs_you: "Needs you",
   recent: "Recently reviewed",
@@ -149,7 +150,7 @@ export function Inbox({
   const [ciFilter, setCiFilter] = useRememberedFilter("ci", inboxFilters.ci);
   const [reviewFilter, setReviewFilter] = useRememberedFilter("review", inboxFilters.review);
   const [sort, setSort] = useRememberedFilter("sort", inboxFilters.sort);
-  const [group, setGroup] = useRememberedFilter("group", inboxFilters.group);
+  const [tab, setTab] = useRememberedFilter("tab", inboxFilters.tab);
 
   // A remembered repo filter for a repo that is no longer a Paseo project would hide every PR
   // with no visible chip to clear it; drop it once the repo list is known.
@@ -206,7 +207,7 @@ export function Inbox({
     });
   }, [prs, search, repoFilter, hideDrafts, ciFilter, reviewFilter]);
 
-  // One group at a time, so a PR that sits in several GitHub searches appears once.
+  // One tab at a time, so a PR that sits in several GitHub searches appears once.
   const listed = useMemo(() => {
     function sortPrs(items: PrSummary[]): PrSummary[] {
       const sorted = [...items];
@@ -228,13 +229,13 @@ export function Inbox({
       return sorted;
     }
 
-    if (group === "needs_you") {
+    if (tab === "needs_you") {
       const items = filtered.filter(isNeedsYou);
       // "Attention" here is the needs-you order (changed since your review, then review
-      // requested). It does not wait on decision-model scores, which other groups use.
+      // requested). It does not wait on decision-model scores, which other tabs use.
       return sort === "attention" ? sortNeedsYou(items) : sortPrs(items);
     }
-    if (group === "recent") {
+    if (tab === "recent") {
       // PRs reviewed from this app, most recent first, then whatever else GitHub says you
       // reviewed. Merely opening a PR doesn't count, and a review only stays listed while the
       // PR itself is still in the inbox (not merged, updated within 30 days).
@@ -261,21 +262,20 @@ export function Inbox({
       if (sort === "updated" || (sort === "attention" && !haveAttention)) return items;
       return sortPrs(items);
     }
-    return sortPrs(filtered.filter((pr) => pr.sections.includes(group)));
-  }, [filtered, effectiveSort, recentLocal, group, sort, haveAttention]);
+    return sortPrs(filtered.filter((pr) => pr.sections.includes(tab)));
+  }, [filtered, effectiveSort, recentLocal, tab, sort, haveAttention]);
 
-  function groupHasItems(candidate: GroupFilter): boolean {
-    if (candidate === "needs_you") return filtered.some(isNeedsYou);
-    if (candidate === "recent") {
-      if (filtered.some((pr) => pr.sections.includes("recent"))) return true;
-      return recentLocal.some((recent) => {
-        const pr = filtered.find((item) => prKey(item.repo, item.number) === prKey(recent.repo, recent.number));
-        return !!pr && (!!recent.reviewedAt || pr.sections.includes("recent"));
-      });
+  // Per-tab counts under the current search and filters, so the tab row shows where the PRs are.
+  const tabCounts = useMemo(() => {
+    const reviewedHere = new Set(recentLocal.filter((recent) => recent.reviewedAt).map((recent) => prKey(recent.repo, recent.number)));
+    function inTab(pr: PrSummary, candidate: TabFilter): boolean {
+      if (candidate === "needs_you") return isNeedsYou(pr);
+      if (candidate === "recent") return pr.sections.includes("recent") || reviewedHere.has(prKey(pr.repo, pr.number));
+      return pr.sections.includes(candidate);
     }
-    return filtered.some((pr) => pr.sections.includes(candidate));
-  }
-  const otherGroup = SECTION_ORDER.find((candidate) => candidate !== group && groupHasItems(candidate));
+    return Object.fromEntries(TAB_ORDER.map((candidate) => [candidate, filtered.filter((pr) => inTab(pr, candidate)).length])) as Record<TabFilter, number>;
+  }, [filtered, recentLocal]);
+  const otherTab = TAB_ORDER.find((candidate) => candidate !== tab && tabCounts[candidate] > 0);
 
   const sortOptions: { value: SortKey; label: string }[] = [
     { value: "attention", label: "Attention" },
@@ -295,10 +295,6 @@ export function Inbox({
     { value: "CHANGES_REQUESTED", label: "Changes requested" },
     { value: "APPROVED", label: "Approved" },
   ];
-  const groupOptions: { value: GroupFilter; label: string }[] = SECTION_ORDER.map((section) => ({
-    value: section,
-    label: SECTION_LABELS[section],
-  }));
   const filtersNarrow = Boolean(search.trim() || repoFilter || hideDrafts || ciFilter !== "any" || reviewFilter !== "any");
 
   if (repos.data && repos.data.repos.length === 0) {
@@ -323,7 +319,7 @@ export function Inbox({
           </Pressable>
         </View>
       )}
-      <View style={{ padding: space.lg, gap: space.md, borderBottomWidth: 1, borderColor: c.border }}>
+      <View style={{ padding: space.lg, paddingBottom: space.sm, gap: space.md }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
           <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: space.sm }}>
             <Icon name="Search" size={14} color={c.foregroundMuted} />
@@ -355,15 +351,6 @@ export function Inbox({
           <FilterChip c={c} label={hideDrafts ? "Drafts hidden" : "Hide drafts"} active={hideDrafts} onPress={() => setHideDrafts((v) => !v)} />
           <ChoiceMenu
             c={c}
-            title="Show"
-            label={SECTION_LABELS[group]}
-            value={group}
-            options={groupOptions}
-            active={group !== "needs_you"}
-            onChange={(next) => setGroup(() => next)}
-          />
-          <ChoiceMenu
-            c={c}
             title="CI"
             label={ciFilter === "any" ? "CI: any" : ciFilter === "failing" ? "CI: failing" : "CI: passing"}
             value={ciFilter}
@@ -391,6 +378,36 @@ export function Inbox({
           />
         </View>
       </View>
+      <View style={{ borderBottomWidth: 1, borderColor: c.border }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xs }}>
+          {TAB_ORDER.map((candidate) => {
+            const selected = candidate === tab;
+            return (
+              <Pressable
+                key={candidate}
+                accessibilityRole="tab"
+                accessibilityState={{ selected }}
+                accessibilityLabel={`${SECTION_LABELS[candidate]}, ${tabCounts[candidate]}`}
+                onPress={() => setTab(() => candidate)}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: space.xs + 2,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  borderBottomWidth: 2,
+                  borderBottomColor: selected ? c.accent : "transparent",
+                }}
+              >
+                <Text style={{ ...font.body, fontWeight: selected ? weight.semibold : weight.regular, color: selected ? c.foreground : c.foregroundMuted }}>
+                  {SECTION_LABELS[candidate]}
+                </Text>
+                <Text style={{ ...font.small, color: c.foregroundMuted }}>{tabCounts[candidate]}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      </View>
 
       {inbox.isPending ? (
         <Skeleton theme={theme} rows={6} lineHeight={64} widths={["100%", "100%", "100%", "100%", "100%", "100%"]} />
@@ -405,18 +422,18 @@ export function Inbox({
       ) : listed.length === 0 && !filtersNarrow ? (
         <EmptyState
           theme={theme}
-          title={group === "needs_you" ? "Nothing needs you" : `Nothing in ${SECTION_LABELS[group]}`}
+          title={tab === "needs_you" ? "Nothing needs you" : `Nothing in ${SECTION_LABELS[tab]}`}
           hint={
-            group === "needs_you"
-              ? otherGroup
-                ? `No open pull request is waiting on your review. ${SECTION_LABELS[otherGroup]} still has some.`
+            tab === "needs_you"
+              ? otherTab
+                ? `No open pull request is waiting on your review. ${SECTION_LABELS[otherTab]} still has some.`
                 : "No open pull request is waiting on your review."
-              : otherGroup
-                ? `${SECTION_LABELS[otherGroup]} still has pull requests.`
-                : "Nothing in the inbox is in this group."
+              : otherTab
+                ? `${SECTION_LABELS[otherTab]} still has pull requests.`
+                : "Nothing in the inbox is in this tab."
           }
-          actionLabel={otherGroup ? `Show ${SECTION_LABELS[otherGroup]}` : undefined}
-          onAction={otherGroup ? () => setGroup(() => otherGroup) : undefined}
+          actionLabel={otherTab ? `Show ${SECTION_LABELS[otherTab]}` : undefined}
+          onAction={otherTab ? () => setTab(() => otherTab) : undefined}
         />
       ) : listed.length === 0 ? (
         <EmptyState
